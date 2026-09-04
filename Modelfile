@@ -1,4 +1,6 @@
-# Adjust the FROM tag to the exact base id Unsloth hands off (qwen3.5:9b or qwen3-9b fallback per PLAN §3.4)
-FROM qwen3.5-9b.Q4_K_M.gguf
+# Post-training handoff for the Honcho dialectic smoke model.
+# FROM points at the GGUF produced by `train_dialectic.py --stage export`;
+# adjust the path/quant to the run that actually lands.
+FROM qwen3-8b.Q4_K_M.gguf
 PARAMETER temperature 0.1
 PARAMETER num_ctx 8192
