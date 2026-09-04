@@ -52,16 +52,35 @@ A fine-tuned dialectic model (base **qwen3.5:9b**, same family as production `lo
   no format failures, and best cost/quality for the intended row count.
 - **Status: findings below; teacher map locked for Phase C — see §3.5.**
 
-### 3.5 Per-step teacher map (locked 2026-09-04 from round-4 data)
+### 3.5 Per-step teacher map (locked 2026-09-04, round-4 data + Daniel's decision)
 
-| role | model | arm id | rationale from round-4 (corrected after raw-arm review) |
+**DECISION (Daniel, 2026-09-04):** correctness order Opus > Sonnet > Qwen3-Max; one-time
+generation, so pay for best = **Opus 5 for the full answer set**. Route: **Anthropic direct
+Message Batches API** (Daniel's Claude account — same 50% batch price as OpenRouter `:batch`,
+no third-party key, no new wallet). Pilot first on the existing 30 contexts, then full set.
+
+| role | model | path | pricing |
 |---|---|---|---|
-| Context generator | DeepSeek | `deepseek/deepseek-chat` | 30/30 clean, $0.01/context. Shortest clean answers (19w). |
-| **Bulk teacher (~80% rows: factual + preference + summary)** | Sonnet 5 | `anthropic/claude-sonnet-5` | 0.794 coverage, 29w median, contradiction 3/3, supersession 3/3, no format failures, zero real fab. ~2.5× cheaper than Opus. |
-| **Escalation slice (~20% rows: hardest contradiction / enumeration, if you want max quality)** | Opus 5 | `anthropic/claude-opus-5` | 0.859 coverage, +0.065 over Sonnet for those rows, longer. Only worth it on the top hard slice, not bulk. |
-| — cost-floor option — | Qwen3-Max | `qwen/qwen3-max` | 0.735, 27w, $0.04/1k rows. Same family as 9B base = best style-match; try before bulk if you want to keep costs near zero. |
-| — dropped — | GPT-5 | (removed from default arms) | 19/30 null-content (64% fail); OpenRouter charges reasoning tokens even on nulls → cost 6.4× estimate. Drop permanently. |
-| — dropped — | Gemini 3.1 Pro | (removed from default arms) | Under-covered (0.492) + leaked its own reasoning text into answers ("Let's refine Attempt 1…"). |
+| Context generator | DeepSeek | OpenRouter sync (`gen`) | $0.32 / $0.89 per M — proven 30/30 clean |
+| **Teacher (ALL rows)** | **Opus 5** | **Anthropic direct batch** (`batch-run`/`batch-fetch`) | **$2.50 / $12.50 per M** (batch 50%), +prompt-cache on shared briefing (10% of input on cached rows) |
+| Fallback / cheaper bulk | Sonnet 5 | Anthropic batch | $1.00 / $5.00 per M |
+| optional top-tier slice | Fable 5 | Anthropic batch | $5.00 / $25.00 per M |
+| — dropped — | GPT-5 | — | 64% null-content + 6.4× actual cost |
+| — dropped — | Gemini 3.1 Pro | — | 0.49 coverage + reasoning-text leak |
+
+**Cost model (measured from the 30 real contexts, ~550 tok in / ~50 tok out per row):**
+- 30-row Opus pilot: **$0.05–0.13**
+- 500 rows: ~$1.10–1.60
+- 2,000 rows: ~$4.10–6.50 (plus ~$0.65–2.60 for contexts via DeepSeek)
+- Cache note: Anthropic cache *writes* cost 1.25× input once per 5-min window; at batch
+  concurrency cache hits are best-effort. Budget with the **no-cache** column, treat hits as upside.
+
+**Batch API facts (from Anthropic docs, 2026-09-04):**
+- `POST /v1/messages/batches` with `requests:[{custom_id, params}]`; cap 100k requests or 256MB.
+- 24h processing window (most < 1h); results downloadable 29 days; **download before then**.
+- No `temperature`/`top_k`/`top_p` on post-Opus-4.6 models (400) — batch code omits them.
+- Result rows: `succeeded` (billed) / `errored`+`canceled`+`expired` (NOT billed).
+- One batch cannot be modified; cancel + resubmit if prompt needs fixing.
 
 **Not used further:** Gemini 3.1 Pro (0.492 coverage + 1/30 code-fence response), GPT-5 (64% nulls).
 
