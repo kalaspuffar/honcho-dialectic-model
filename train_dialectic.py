@@ -22,11 +22,17 @@ import argparse, json, os, sys
 from unsloth import FastLanguageModel  # noqa: E402
 
 MODEL_ALIASES = {
-    "qwen3.5:9b":  "Qwen/Qwen3.5-9B",
-    "qwen3.5:4b":  "Qwen/Qwen3.5-4B",
-    "qwen3.6:27b": "Qwen/Qwen3.6-27B",
-    "qwen3:8b":    "Qwen/Qwen3-8B",         # deriver-proven fallback base (PLAN §3.4)
-    "unsloth/qwen3.5-9b-gguf": "unsloth/Qwen3.5-9B-GGUF",  # 4-bit GGUF load, less RAM
+    # Qwen/Qwen3.5-9B is an image-text-to-text (VL) model — Unsloth loads a
+    # Qwen3VLProcessor on it and chokes on text-only rows (attempt-3). Do NOT
+    # point a text SFT/DPO at it. The Qwen3.5 9B class has no official text-only
+    # build at the Qwen org, so the smoke anchors on the deriver-proven text base.
+    "qwen3.5:9b":  "Qwen/Qwen3-8B",   # -> text-only Qwen3-8B (see note above)
+    "qwen3:8b":    "Qwen/Qwen3-8B",   # deriver-proven text base (PLAN §3.4)
+    "qwen3.5:4b":  "Qwen/Qwen3-8B",
+    "qwen3.6:27b": "Qwen/Qwen3-8B",
+    # If you specifically need the 9B class, a community text-only build exists:
+    # "principled-intelligence/Qwen3.5-9B-text-only" / "techwithsergiu/Qwen3.5-text-9B"
+    "unsloth/qwen3.5-9b-gguf": "Qwen/Qwen3-8B",
 }
 
 def resolve_base(name: str) -> str:
@@ -237,8 +243,9 @@ def main():
     ap.add_argument("--stage", required=True, choices=["sft", "dpo", "export"])
     ap.add_argument("--data", help="jsonl (sft or dpo rows)")
     ap.add_argument("--sft",  help="path to merged HF dir (dpo stage: smoke/merged)")
-    ap.add_argument("--model", default="Qwen/Qwen3.5-9B",
-                    help="HF repo id (qwen3.5:9b / qwen3:8b tags mapped via MODEL_ALIASES)")
+    ap.add_argument("--model", default="Qwen/Qwen3-8B",
+                    help="HF repo id. Default is the text-only Qwen3-8B (deriver-proven). "
+                         "qwen3.5:9b maps to Qwen3-8B because Qwen/Qwen3.5-9B is a VL model.")
     ap.add_argument("--out", required=True, help="output dir on node7")
     ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--dpo-beta", type=float, default=0.1)

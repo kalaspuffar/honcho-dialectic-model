@@ -111,7 +111,8 @@ Once a checkpoint passes Gate 1 AND the 30-context eval, the pipeline is:
 | Date | Stage | What failed | Fix / workaround |
 |---|---|---|---|
 | 2026-09-04 | sft (attempt 1) | `HFValidationError: Repo id ... 'qwen3.5:9b'` — `qwen3.5:9b` is an Ollama tag; Unsloth loads from the HF Hub. Also import-order warning (unsloth must be imported first). | Script v0.5.0: `import unsloth` first + `MODEL_ALIASES` maps `qwen3.5:9b -> Qwen/Qwen3.5-9B`. Re-run the same §3 command. |
-| 2026-09-04 | sft (attempt 2) | `ImportError: cannot import name 'DataCollatorForCompletionOnlyLM' from 'trl'` — node7's trl build doesn't export it. | v0.5.1: dropped the trl-SFT dependency entirely. SFT now uses plain `transformers.Trainer` + pre-tokenized rows with manual label masking (loss on the assistant answer only) — only needs transformers+peft+torch, all already in the venv. DPO stage still uses trl (present). |
+| 2026-09-04 | sft (attempt 3) | `PIL.UnidentifiedImageError` — `Qwen/Qwen3.5-9B` is an **image-text-to-text (VL)** model (confirmed via Hub API: pipeline_tag `image-text-to-text`); Unsloth loaded a `Qwen3VLProcessor` and tried to read the prompt as an image. | v0.5.2: default + aliases now anchor on the text-only **`Qwen/Qwen3-8B`** (deriver-proven, `text-generation`). The 9B class has no official text-only build; community options listed in the script if we ever want the 9B class specifically. |
+| 2026-09-04 | env | Unsloth banner shows the run host is **RTX 3080 Ti, 11.6 GB** (not A6000 48GB as previously assumed). | Batch 1 + gradient checkpointing + 4-bit base are mandatory. If OOM: load `--model unsloth/Qwen3-8B-GGUF` (4-bit) instead of the BF16 repo, or raise `--max-seq` only if RAM allows. |
 
 ## 8. Files to keep in sync
 - **Data** (`smoke10_sft.jsonl`, `smoke10_dpo.jsonl`, `dataset_*.jsonl`): lives here, git-ignored. Rebuild any time with:
