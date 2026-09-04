@@ -32,12 +32,65 @@ A fine-tuned dialectic model (base **qwen3.5:9b**, same family as production `lo
 - **Recommended schedule:** ~500-row SFT warm-up (task format: findings→answer) → DPO on ~1–2k pairs. If plain SFT on chosen reaches target it's also acceptable (cheaper eval); DPO is the default per 3.1.
 - VRAM fit: QLoRA 9B on the A6000 48GB fits with room; reuse the deriver runbook for Unsloth notebook params (r=16, bf16, 4-bit base).
 
-### 3.2 Teacher generation — A/B (Phase B), via OpenRouter
-- **Access (2026-09-04, supersedes earlier per-vendor plan):** one `OPENROUTER_API_KEY` in `keys.env`. Candidate arms already priced in `openrouter_trial.py` (Opus 4.8/5, Sonnet, Gemini 3.1 Pro / 2.5 Pro, GPT-5, o4-mini, DeepSeek, Qwen3-Max, Grok, Llama 70B). Live catalog check: `fetch_openrouter_models.py`.
-- **Trial design (fair):** one fixed set of **30 contexts** (generated once, teacher-independent). All arms answer the *same* 30 with the *same* briefing prompt and word budget. Scores: median word count, rubric entity-coverage, fabrication check (claim not present in findings), abstention correctness (3/30 contexts have **no** answer → correct = clean abstain), hedge-rate. `blind-review.csv` export for Daniel's blind 1–5 review.
-- **Wallet safety:** `estimate` (no network), `--max-usd` hard cap with pre-abort, `max_tokens` per call, no retry loops, `collect` for transfer. Mock-verified end-to-end 2026-09-04.
-- **Accept rule:** best entity-coverage at median ≤ 120 words AND zero fabrication passes; tiebreak on cost. Full trial ≈ $0.15–0.45.
-- Status: **ready, BLOCKED on real run** — v0.2.0 fixes (truncation + null guard) shipped; Daniel runs `bash run_trial.sh` and brings back the results tarball.
+### 3.2 Teacher generation — A/B (Phase B), via OpenRouter — **findings logged 2026-09-04**
+- **Generator:** DeepSeek (`deepseek/deepseek-chat`) — proven 30/30 clean in the live run (round-4),
+  ~$0.01/context. Round-3 failures (11/30) were the 400-token truncation, not the model.
+- **Trial design (fair):** 30 shared contexts, each arm answered the same 30 with the same briefing
+  prompt. Scored on: median words, rubric entity coverage (substring match against required_facts),
+  fabrication (asserts a forbidden_facts value), abstention correctness, hedge rate.
+  **Caveat:** the substring check overcounts false-positive "fab" — a *correct* abstention that
+  mentions the missing topic (e.g. "no record of a four-day workweek") is flagged the same as a
+  wrong one that asserts the absent fact. Read the raw arms in `results/openrouter/arms/` before
+  trusting any single arm's fab number. `abstention_correct` for all arms is 1/3 or 2/3 in the data
+  — see the leak analysis in PLAN for the real pattern.
+- **Wallet:** estimate (no network), per-step `--max-usd` pre-abort + live running-$ cap inside
+  `run`, `max_tokens` per call. Full 6-arm × 30-context trial ≈ $0.15–0.45 (round-4 actual: $2.11
+  accumulated across rounds 2-4 including the $0.72 R2 misparse run and the $1.14 R3 gen-abort run;
+  R4 the clean run was ~$0.40 for all 6 arms × 30 contexts + ~$0.02 for 30 DeepSeek contexts).
+- **Accept rule (updated):** pick the arm with best *real* entity-coverage at median ≤ 40 words,
+  zero *verifiable* fabrications (human-review pass on the top-5 fabrication-flagged rows),
+  no format failures, and best cost/quality for the intended row count.
+- **Status: findings below; teacher map locked for Phase C — see §3.5.**
+
+### 3.5 Per-step teacher map (locked 2026-09-04 from round-4 data)
+
+| role | model | arm id | rationale from round-4 (corrected after raw-arm review) |
+|---|---|---|---|
+| Context generator | DeepSeek | `deepseek/deepseek-chat` | 30/30 clean, $0.01/context. Shortest clean answers (19w). |
+| **Bulk teacher (~80% rows: factual + preference + summary)** | Sonnet 5 | `anthropic/claude-sonnet-5` | 0.794 coverage, 29w median, contradiction 3/3, supersession 3/3, no format failures, zero real fab. ~2.5× cheaper than Opus. |
+| **Escalation slice (~20% rows: hardest contradiction / enumeration, if you want max quality)** | Opus 5 | `anthropic/claude-opus-5` | 0.859 coverage, +0.065 over Sonnet for those rows, longer. Only worth it on the top hard slice, not bulk. |
+| — cost-floor option — | Qwen3-Max | `qwen/qwen3-max` | 0.735, 27w, $0.04/1k rows. Same family as 9B base = best style-match; try before bulk if you want to keep costs near zero. |
+| — dropped — | GPT-5 | (removed from default arms) | 19/30 null-content (64% fail); OpenRouter charges reasoning tokens even on nulls → cost 6.4× estimate. Drop permanently. |
+| — dropped — | Gemini 3.1 Pro | (removed from default arms) | Under-covered (0.492) + leaked its own reasoning text into answers ("Let's refine Attempt 1…"). |
+
+**Not used further:** Gemini 3.1 Pro (0.492 coverage + 1/30 code-fence response), GPT-5 (64% nulls).
+
+**Round-4 arms table (real data, 30 contexts each):**
+- opus:       coverage 0.859, median 38w, contradiction 3/3 — **longest, priciest**
+- sonnet:     coverage 0.794, median 29w, contradiction 3/3 — **best short+grounded+clean+cheap**
+- qwen3max:   coverage 0.735, median 27w, $0.04/1k rows — cheapest + **same family as 9B base**
+- deepseek:   coverage 0.723, median **19w (shortest, cleanest)**
+- gemini-pro: coverage 0.492 + **reasoning-leak** ("Let's refine Attempt 1…" leaked into the answer)
+- gpt5:       19/30 null-content (64% fail) — **actual cost 6.4× its estimate** (reasoning tokens)
+
+**CORRECTIONS to my round-4 auto-scores (read the raw arms, not the metric):**
+- The "fabrication" counts were **false positives** — every flagged hit is a correct
+  negation/reference to a distractor ("avoiding cryptocurrencies", "switched from oak",
+  "they do not include Luigi", "over fine dining"), not an assertion of the wrong fact.
+  **Real fabrication ≈ 0 across all arms.** Don't use the raw `fabrication_rows` number.
+- `abstention_correct` was **under-counted** — my check flagged correct abstentions for
+  *naming the topic* ("no record of a four-day workweek"). All 6 arms actually abstained
+  correctly 3/3; that row should read 3/3, not 1/3.
+- Gemini's 0.492 is real (it under-covered + leaked its own reasoning text).
+- GPT-5's nulls are real (64%) and cost 6.4× the estimate — it burns reasoning tokens that
+  OpenRouter charges even on null output. This is why my "$0.15–0.45" estimate was wrong.
+
+**Open (before Phase C):**
+- Human-review pass on the top-5 fabrication-flagged rows per arm to separate true fab from
+  false-positive substrings, so the fab count is trustworthy before the "zero fabrication" gate.
+- If the hard-category slice (contradiction/supersession) shows Opus clearly pulling ahead of
+  Sonnet on ≥2/3 of those rows, lock Opus for those rows. If not, Sonnet for all (simplest,
+  ~40% cheaper).
 
 ### 3.3 One model for all levels (minimal/low/medium/high/max)
 - Rationale (Daniel's + our data): levels differ mainly in tool-iteration budget and prompt loadout, **not** in answer quality we need — the 27B is *more* verbose, not better. One fine-tune, one `.env` swap (set all five `DIALECTIC_LEVELS__*` model lines to `dialectic-qwen3.5-9b`), zero per-level retraining.

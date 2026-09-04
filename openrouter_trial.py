@@ -58,6 +58,7 @@ ARMS = {
     "o4mini":      ("openai/o4-mini",               1.10,  4.4, "o4-mini (reasoning, cheap)"),
     "deepseek":    ("deepseek/deepseek-chat",       0.32,  0.89,"DeepSeek V3-chat (very cheap)"),
     "qwen3max":    ("qwen/qwen3-max",               0.78,  3.90,"Qwen3-Max (same family as base)"),
+    "fable":       ("anthropic/claude-fable-5",    10.00, 50.0, "Claude Fable 5 (top tier, priciest; :batch = 5/25)"),
     "grok46":      ("x-ai/grok-4.6",                2.00,  6.0, "Grok 4.6"),
     "llama70":     ("meta-llama/llama-3.3-70b-instruct", 0.10, 0.32, "Llama 3.3 70B (cheapest frontier-class)"),
     # --- test-only arms (mock server) ---
@@ -342,6 +343,266 @@ def cmd_estimate(a):
 
 PRICE_BY_ID = {mid: (inm, outm) for mid, inm, outm, _ in ARMS.values()}
 
+# ---- Anthropic native Message Batches (no BYOK, 50% of standard $) ----
+# Daniel's Claude account is the teacher source; the deriver already uses this API.
+# Prices are the Batch rates ($/MTok) = 50% of standard, identical to OpenRouter's :batch.
+# NOTE: no `temperature`/`top_k`/`top_p` — post-Opus-4.6 models REJECT them (400).
+ANTHROPIC = os.environ.get("ANTHROPIC_API_BASE", "https://api.anthropic.com")
+ANTHROPIC_VERSION = os.environ.get("ANTHROPIC_VERSION", "2023-06-01")
+ANTHROPIC_ARMS = {
+    "opus":   "claude-opus-5",
+    "sonnet": "claude-sonnet-5",
+    "fable":  "claude-fable-5",
+}
+ANTHROPIC_BATCH_PRICE = {
+    "claude-opus-5":   (2.50, 12.50),
+    "claude-sonnet-5": (1.00, 5.00),
+    "claude-fable-5":  (5.00, 25.00),
+}
+BATCH_ANSWER_SYSTEM = "You write terse, fully grounded recall answers."
+
+def load_anth_key():
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return os.environ["ANTHROPIC_API_KEY"]
+    for f in ("keys.env", os.path.join(os.path.dirname(os.path.abspath(__file__)), "keys.env")):
+        if os.path.exists(f):
+            for line in open(f):
+                if line.strip().startswith("ANTHROPIC_API_KEY="):
+                    return line.split("=", 1)[1].strip()
+    return None
+
+def anth_headers(key):
+    return {
+        "Content-Type": "application/json",
+        "anthropic-version": ANTHROPIC_VERSION,
+        "x-api-key": key,
+    }
+
+def anth_get(url, key, timeout=120):
+    req = urllib.request.Request(url, headers={"x-api-key": key, "anthropic-version": ANTHROPIC_VERSION})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+def row_block(c):
+    """Per-row user content (BRIEFING lives in the cached system block in batch mode)."""
+    return ("PERSONA: " + c["persona"]
+            + "\n\nFINDINGS:\n" + "\n".join(f"- [{f['date']}] {f['text']}" for f in c["findings"])
+            + "\n\nDistractors (WRONG - do not assert):\n" + "\n".join("- " + d for d in c["distractors"])
+            + "\n\nQUESTION: " + c["question"])
+
+def batch_build_payload(arm, ctxs):
+    model = ANTHROPIC_ARMS[arm]
+    shared = BATCH_ANSWER_SYSTEM + "\n\n" + BRIEFING
+    return model, {
+        "requests": [
+            {
+                "custom_id": f"{arm}_{c['id']}",  # must match ^[a-zA-Z0-9_-]{1,64}$
+                "params": {
+                    "model": model,
+                    "max_tokens": MAX_TOKENS_OUT,  # >= 1 required; 800 cap
+                    # Shared prefix across all rows -> prompt-cache hit (stacks with batch 50%).
+                    "system": [{"type": "text", "text": shared,
+                                "cache_control": {"type": "ephemeral"}}],
+                    "messages": [{"role": "user", "content": row_block(c)}],
+                },
+            }
+            for c in ctxs
+        ]
+    }
+
+def batch_estimate(arm, ctxs):
+    """(worst, best, tin_total, tout) — worst = zero cache hits;
+    best = shared system prefix cached on (n-1) rows (cache reads = 10% of input)."""
+    inm, outm = ANTHROPIC_BATCH_PRICE[ANTHROPIC_ARMS[arm]]
+    shared_tok = tokens_estimate(BATCH_ANSWER_SYSTEM + "\n\n" + BRIEFING)
+    row_toks = [6 + tokens_estimate(row_block(c)) for c in ctxs]
+    n = len(ctxs)
+    tin_worst = n * shared_tok + sum(row_toks)
+    tin_best = shared_tok + (n - 1) * int(shared_tok * 0.10) + sum(row_toks)
+    tout = n * 55  # terse answers ~55 words; cap 800 tokens
+    worst = (tin_worst * inm + tout * outm) / 1e6
+    best = (tin_best * inm + tout * outm) / 1e6
+    return worst, best, tin_worst, tout
+
+def batches_dir():
+    d = os.path.join(R, "batches")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+def cmd_batch_run(a):
+    key = load_anth_key()
+    if not key:
+        print("ANTHROPIC_API_KEY not set (env or keys.env). Aborting — nothing sent.")
+        print("This uses your Anthropic account directly (50% batch rate), not OpenRouter.")
+        return 1
+    ctxs_file = os.path.join(R, "contexts.jsonl")
+    if not os.path.exists(ctxs_file):
+        print(f"no contexts file at {ctxs_file} — run `gen` first (OpenRouter, DeepSeek).")
+        return 1
+    ctxs = [json.loads(l) for l in open(ctxs_file) if l.strip() and not json.loads(l).get("__failed_ctx")]
+    if not ctxs:
+        print(f"no usable (non-failed) contexts in {ctxs_file} — regenerate them first.")
+        return 1
+    arms = [k.strip() for k in a.arms.split(",") if k.strip()]
+    bad = [k for k in arms if k not in ANTHROPIC_ARMS]
+    if bad:
+        print(f"unknown arm(s) for Anthropic batch: {bad} — valid: {sorted(ANTHROPIC_ARMS)}")
+        return 1
+
+    print("pre-spend estimate (Anthropic batch 50% rate, NO network yet):")
+    total = 0.0
+    for k in arms:
+        worst, best, tin, tout = batch_estimate(k, ctxs)
+        total += worst
+        print(f"  {k:9s} {ANTHROPIC_ARMS[k]:20s} {len(ctxs):>5d} rows  ~${best:.4f} (w/ cache) – ${worst:.4f} (no cache)")
+    print(f"  EST TOTAL ${total:.4f}   cap ${a.max_usd}")
+    if total > a.max_usd and not a.yes:
+        print(f"\nABORT: estimate (no-cache worst case) ${total:.4f} exceeds --max-usd {a.max_usd}.\n"
+              f"Real cost is lower (shared prompt is cacheable). Proceed anyway with --yes "
+              f"or raise the cap. Nothing has been sent.")
+        return 1
+
+    for k in arms:
+        model, payload = batch_build_payload(k, ctxs)
+        worst, best, tin, tout = batch_estimate(k, ctxs)
+        body = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            ANTHROPIC + "/v1/messages/batches", data=body, headers=anth_headers(key), method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=180) as r:
+                b = json.load(r)
+        except urllib.error.HTTPError as e:
+            print(f"  {k}: SUBMIT FAILED HTTP {e.code}: {e.read()[:300].decode(errors='replace')}")
+            return 1
+        except Exception as e:
+            print(f"  {k}: SUBMIT FAILED {type(e).__name__}: {e}")
+            return 1
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        mani = {
+            "arm": k, "model": model, "n": len(ctxs), "est_usd_low": round(best, 5),
+            "est_usd_high": round(worst, 5), "batch_id": b["id"],
+            "processing_status": b.get("processing_status"),
+            "submitted_at": datetime.datetime.now().isoformat(),
+            "expires_at": b.get("expires_at"),
+            "poll_url": f"{ANTHROPIC}/v1/messages/batches/{b['id']}",
+            "results_url_template": f"{ANTHROPIC}/v1/messages/batches/{{id}}/results",
+            "base_estimate_tokens_in": tin, "base_estimate_tokens_out": tout,
+        }
+        mp = os.path.join(batches_dir(), f"batch_{k}_{stamp}.json")
+        open(mp, "w").write(json.dumps(mani, indent=2))
+        print(f"  {k}: submitted batch {b['id']} ({len(ctxs)} requests). Manifest: {mp}")
+    print("\nBatch processing is async (most finish in < 1h, 24h max). When ready, or any time:\n"
+          f"  python3 openrouter_trial.py batch-fetch --manifest results/openrouter/batches/batch_<arm>_*.json\n"
+          f"(without --no-wait it polls until ended, then scores and writes arms/<arm>/ as before.)")
+    return 0
+
+
+def cmd_batch_fetch(a):
+    key = load_anth_key()
+    if not key:
+        print("ANTHROPIC_API_KEY not set (env or keys.env)."); return 1
+    manifests = []
+    if a.manifest:
+        manifests = [a.manifest]
+    else:
+        bd = os.path.join(R, "batches")
+        if not os.path.isdir(bd):
+            print(f"no batch manifests under {bd} — run `batch-run` first."); return 1
+        manifests = sorted(os.path.join(bd, f) for f in os.listdir(bd) if f.endswith(".json"))
+    if not manifests:
+        print("no batch manifests found."); return 1
+    if len(manifests) > 1:
+        print(f"multiple manifests; passing --manifest picks one. Using newest: {manifests[-1]}")
+        manifests = [manifests[-1]]
+    mp = manifests[0]
+    m = json.load(open(mp))
+    arm, model = m["arm"], m["model"]
+    print(f"batch {m['batch_id']}  arm={arm} model={model} n={m['n']}")
+
+    done_url = f"{ANTHROPIC.rstrip('/')}/v1/messages/batches/{m['batch_id']}/results"
+    if not a.no_wait:
+        while True:
+            b = json.loads(anth_get(m["poll_url"], key))
+            rc = b.get("request_counts", {})
+            st = b.get("processing_status")
+            print(f"  status={st} {rc}")
+            if st == "ended":
+                break
+            if st in ("canceled", "cancelled"):
+                print("batch was canceled — no results."); return 1
+            time.sleep(a.poll_interval)
+    else:
+        b = json.loads(anth_get(m["poll_url"], key))
+        if b.get("processing_status") != "ended":
+            print(f"still {b.get('processing_status')}; use without --no-wait when it ends.")
+            return 1
+    if not done_url:
+        print("could not build results_url. Check --manifest and base."); return 1
+
+    # stream results (JSONL). Batch arms live under results/openrouter/batch/<arm>/ —
+    # KEEP SEPARATE from arms/<arm>/ so they never clobber sync-run or other-source rows.
+    ctxs_file = os.path.join(R, "contexts.jsonl")
+    ctxs = {json.loads(l)["id"]: json.loads(l)
+            for l in open(ctxs_file) if l.strip() and not json.loads(l).get("__failed_ctx")}
+    batch_root = os.path.join(R, "batch")
+    arm_dir = os.path.join(batch_root, arm)
+    os.makedirs(arm_dir, exist_ok=True)
+    raw_data = anth_get(done_url, key, timeout=300)
+    lines = [l for l in (s.decode("utf-8", errors="replace") for s in raw_data.split(b"\n")) if l.strip()]
+    recs, n_err = {}, 0
+    for line in lines:
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            n_err += 1; continue
+        cid = obj.get("custom_id", "")
+        ctx_id = cid.split("_", 1)[1] if "_" in cid else cid
+        res = obj.get("result", {})
+        rec = {"id": ctx_id, "arm": arm, "model": model, "ok": False, "answer": ""}
+        if res.get("type") == "succeeded":
+            msg = res.get("message", {})
+            text = ""
+            for blk in (msg.get("content") or []):
+                if isinstance(blk, dict) and blk.get("type") == "text":
+                    text += blk.get("text", "")
+            if not text and isinstance(msg.get("content"), str):
+                text = msg["content"]
+            u = msg.get("usage") or {}
+            rec["usage"] = u
+            j = extract_json(text)
+            ans = (j or {}).get("answer") if isinstance(j, dict) else None
+            rec["answer"] = ans if isinstance(ans, str) and ans.strip() else (text.strip() if text else "")
+            rec["ok"] = bool(rec["answer"].strip())
+            if not rec["ok"]:
+                rec["error"] = "no answer text in batch result"
+        else:
+            rec["error"] = f"batch result type={res.get('type')}: " \
+                           f"{json.dumps(res.get('error', {}))[:300]}"
+            n_err += 1
+        recs[ctx_id] = rec
+        open(os.path.join(arm_dir, f"{ctx_id}.json"), "w").write(json.dumps(rec, indent=1))
+    print(f"fetched {len(recs)} rows ({n_err} failed/expired/errored) -> {arm_dir}")
+
+    # score + write a SEPARATE batch_summary.json (never merge into the sync-run summary.json)
+    scored_ctxs = [c for c in (ctxs.get(k) for k in recs) if c]
+    st = score(scored_ctxs, recs)
+    sp = os.path.join(batch_root, "batch_summary.json")
+    summary = json.load(open(sp)) if os.path.exists(sp) else {"ts": None, "arms": {}}
+    inm, outm = ANTHROPIC_BATCH_PRICE.get(model, (0, 0))
+    usage = sum((r.get("usage", {}).get("input_tokens", 0) * inm +
+                 r.get("usage", {}).get("output_tokens", 0) * outm) for r in recs.values()) / 1e6
+    summary["arms"][arm] = {"model": model, "source": f"anthropic-batch {m['batch_id']}",
+                            "actual_usd_upper": round(usage, 5), **st,
+                            "note": "usage excludes cached-input discount (billed at 10%); treat as worst case"}
+    summary["ts"] = datetime.datetime.now().isoformat()
+    open(sp, "w").write(json.dumps(summary, indent=1))
+    print(f"-- {arm}: {st['n']} rows, median {st['median_words']}w, coverage {st['entity_coverage']}, "
+          f"fab(flags) {st['fabrication_rows']}, abst {st['abstention_correct']}, hedges {st['hedge_rows']}")
+    print(f"summary saved to {sp}")
+    print(f"NOTE: batch rows live under results/openrouter/batch/ — separate from sync arms/. "
+          f"Review batch/opus vs arms/opus (round 4) before deciding.")
+    return 0
+
 def cmd_gen(a):
     key = load_key()
     if not key:
@@ -491,10 +752,18 @@ def main():
     r = sub.add_parser("run"); r.add_argument("--arms", default="deepseek,opus,sonnet,gemini-pro,gpt5,qwen3max")
     r.add_argument("--max-usd", type=float, default=5.0); r.add_argument("--yes", action="store_true")
     r.add_argument("--sleep", type=float, default=0.5)
+    br = sub.add_parser("batch-run", help="submit Anthropic Message Batches (50% rate, your Claude account)")
+    br.add_argument("--arms", default="opus")
+    br.add_argument("--max-usd", type=float, default=5.0); br.add_argument("--yes", action="store_true")
+    bf = sub.add_parser("batch-fetch", help="poll a batch until ended, then write/score arms/<arm>/")
+    bf.add_argument("--manifest", help="specific batch_*.json manifest (default: newest)")
+    bf.add_argument("--poll-interval", type=int, default=60)
+    bf.add_argument("--no-wait", action="store_true", help="check once; fail if not ended yet")
     sub.add_parser("collect")
 
     a = ap.parse_args()
-    handlers = {"estimate": cmd_estimate, "gen": cmd_gen, "run": cmd_run, "collect": cmd_collect}
+    handlers = {"estimate": cmd_estimate, "gen": cmd_gen, "run": cmd_run, "collect": cmd_collect,
+                "batch-run": cmd_batch_run, "batch-fetch": cmd_batch_fetch}
     if a.cmd not in handlers:
         ap.print_help(); return 1
     return handlers[a.cmd](a)
