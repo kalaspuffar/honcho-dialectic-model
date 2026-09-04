@@ -110,7 +110,8 @@ Once a checkpoint passes Gate 1 AND the 30-context eval, the pipeline is:
 ## 7. Failure log (fill in as we hit them)
 | Date | Stage | What failed | Fix / workaround |
 |---|---|---|---|
-| 2026-09-04 | sft (attempt 1) | `HFValidationError: Repo id ... 'qwen3.5:9b'` — `qwen3.5:9b` is an Ollama tag; Unsloth loads from the HF Hub. Also import-order warning (unsloth must be imported first). | Script v0.5.0: `import unsloth` first + `MODEL_ALIASES` maps `qwen3.5:9b -> Qwen/Qwen3.5-9B`. SFT also switched to `SFTTrainer` + completion-only collator (loss on the answer only). Re-run the same §3 command. |
+| 2026-09-04 | sft (attempt 1) | `HFValidationError: Repo id ... 'qwen3.5:9b'` — `qwen3.5:9b` is an Ollama tag; Unsloth loads from the HF Hub. Also import-order warning (unsloth must be imported first). | Script v0.5.0: `import unsloth` first + `MODEL_ALIASES` maps `qwen3.5:9b -> Qwen/Qwen3.5-9B`. Re-run the same §3 command. |
+| 2026-09-04 | sft (attempt 2) | `ImportError: cannot import name 'DataCollatorForCompletionOnlyLM' from 'trl'` — node7's trl build doesn't export it. | v0.5.1: dropped the trl-SFT dependency entirely. SFT now uses plain `transformers.Trainer` + pre-tokenized rows with manual label masking (loss on the assistant answer only) — only needs transformers+peft+torch, all already in the venv. DPO stage still uses trl (present). |
 
 ## 8. Files to keep in sync
 - **Data** (`smoke10_sft.jsonl`, `smoke10_dpo.jsonl`, `dataset_*.jsonl`): lives here, git-ignored. Rebuild any time with:

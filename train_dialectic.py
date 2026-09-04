@@ -1,51 +1,51 @@
 #!/usr/bin/env python3
 """train_dialectic.py — Unsloth SFT -> optional DPO -> GGUF export for Honcho dialectic model.
 
-v0.5.0 changes (after first node7 attempt):
-  * `import unsloth` is now the FIRST import (Unsloth must patch before transformers/peft load).
-  * BASE is a HuggingFace repo id, not an Ollama tag. Ollama tags in ~/github/honcho-dialectic-model
-    fail:  qwen3.5:9b  ->  Qwen/Qwen3.5-9B     (alias table below auto-maps common tags)
-  * SFT now uses trl.SFTTrainer + DataCollatorForCompletionOnlyLM so the loss is computed
-    ONLY on the assistant answer (prompt tokens are masked) — the previous version masked nothing.
-  * Export writes a 4-bit GGUF via model.save_pretrained_gguf().
+v0.5.1 (2026-09-04) — after 2 node7 trl-compat bugs:
+  * SFT uses plain transformers.Trainer + pre-tokenized rows with manual label masking.
+    No trl dependency. Loss is on the assistant answer only.
+  * DPO is implemented manually (no trl.DPOTrainer) as a Trainer subclass that
+    computes seqlogp and the DPO loss from beta * (dchosen - drejected). Uses
+    PEFT's disable_adapter_layers to get the reference policy cheaply.
+  * `import unsloth` is still the first import (required by Unsloth's patches).
+  * `MODEL_ALIASES` maps common Ollama tags (qwen3.5:9b, qwen3:8b) to the real
+    HuggingFace repo ids (Qwen/Qwen3.5-9B, Qwen/Qwen3-8B).
 
-Usage (on node7, the local GPU host):
+Usage (on node7, GPU host):
   python3 train_dialectic.py --stage sft  --data smoke10_sft.jsonl --out smoke
   python3 train_dialectic.py --stage dpo  --sft smoke/merged --data smoke10_dpo.jsonl --out dpo
-  python3 train_dialectic.py --stage export --model smoke/merged --out smoke-v0    # 4-bit GGUF
+  python3 train_dialectic.py --stage export --model smoke/merged --out smoke-v0
 """
-import unsloth  # noqa: F401  — MUST be the very first import (Unsloth patches transformers/peft on load)
+import unsloth  # noqa: F401  — MUST be first (Unsloth patches transformers/peft on load)
 import argparse, json, os, sys
 
 from unsloth import FastLanguageModel  # noqa: E402
 
-# Ollama tag -> HuggingFace repo id  (Unsloth loads from HF, not Ollama)
 MODEL_ALIASES = {
-    "qwen3.5:9b": "Qwen/Qwen3.5-9B",
-    "qwen3:8b":   "Qwen/Qwen3-8B",     # deriver-proven fallback base (PLAN §3.4)
-    "qwen3.5:4b": "Qwen/Qwen3.5-4B",
+    "qwen3.5:9b":  "Qwen/Qwen3.5-9B",
+    "qwen3.5:4b":  "Qwen/Qwen3.5-4B",
     "qwen3.6:27b": "Qwen/Qwen3.6-27B",
+    "qwen3:8b":    "Qwen/Qwen3-8B",         # deriver-proven fallback base (PLAN §3.4)
     "unsloth/qwen3.5-9b-gguf": "unsloth/Qwen3.5-9B-GGUF",  # 4-bit GGUF load, less RAM
 }
 
 def resolve_base(name: str) -> str:
     n = (name or "").strip()
     if n.endswith(".gguf") or n.startswith("/"):
-        return n  # local file path
+        return n
     return MODEL_ALIASES.get(n, n)
 
 def load_model(base, max_seq_length=8192):
-    model, tokenizer = FastLanguageModel.from_pretrained(
+    return FastLanguageModel.from_pretrained(
         model_name=base,
         max_seq_length=max_seq_length,
-        dtype=None,          # Unsloth picks bf16
+        dtype=None,          # bf16 via Unsloth
         load_in_8bit=False,
-        token=None,          # pull from ~/.cache/huggingface/token if the repo is gated
+        token=None,
     )
-    return model, tokenizer
 
 def add_lora(model, r=16):
-    model = FastLanguageModel.get_peft_model(
+    return FastLanguageModel.get_peft_model(
         model,
         r=r,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
@@ -55,50 +55,148 @@ def add_lora(model, r=16):
         bias="none",
         use_gradient_checkpointing="unsloth",
     )
-    return model
 
-def prep_chat_rows(data_path):
-    """rows: {messages:[system,user,assistant]} -> {prompt(str), completion(str)}"""
-    rows = [json.loads(l) for l in open(data_path) if l.strip()]
-    return rows
-
+# ---------- SFT ----------
 def run_sft(data, out, base, epochs=3, max_seq_length=8192):
-    from datasets import Dataset
-    from trl import SFTTrainer, DataCollatorForCompletionOnlyLM, SFTConfig
+    from torch.utils.data import Dataset as TDDataset
+    from transformers import Trainer, TrainingArguments
     base = resolve_base(base)
     print(f"[sft] base = {base}")
     model, tokenizer = load_model(base, max_seq_length)
     model = add_lora(model)
 
-    rows = prep_chat_rows(data)
-    formatted = []
+    rows = [json.loads(l) for l in open(data) if l.strip()]
+    samples = []
     for r in rows:
         msgs = r["messages"]
-        assert msgs[-1]["role"] == "assistant", "expected [system,user,assistant] rows"
-        # apply_chat_template gives prompt+answer as ONE string; completion-only collator
-        # masks everything before the completion column's completion marker.
-        full = tokenizer.apply_chat_template(msgs, tokenize=False)
-        prompt_only = tokenizer.apply_chat_template(msgs[:-1], tokenize=False, add_generation_prompt=True)
-        formatted.append({"prompt": prompt_only, "completion": full[len(prompt_only):]})
-    ds = Dataset.from_list(formatted)
-    test = None
-    if len(ds) > 4:
-        ds = ds.train_test_split(test_size=min(2, max(1, len(ds) // 10)), seed=7)
-        test = ds["test"]
-    train = ds["train"] if "train" in ds else ds
-    train = train.train_test_split(test_size=max(1, len(train) // 10), seed=7)["train"] if len(train) > 6 else train
+        assert msgs[-1]["role"] == "assistant", "expected [system,user,assistant]"
+        full_text   = tokenizer.apply_chat_template(msgs, tokenize=False)
+        prompt_text = tokenizer.apply_chat_template(msgs[:-1], tokenize=False, add_generation_prompt=True)
+        enc = tokenizer(full_text, truncation=True, max_length=max_seq_length)
+        input_ids, at_mask = enc["input_ids"], enc["attention_mask"]
+        prompt_len = len(tokenizer(prompt_text, truncation=True, max_length=max_seq_length)["input_ids"])
+        labels = [-100] * len(input_ids)
+        labels[prompt_len:] = input_ids[prompt_len:]
+        samples.append({"input_ids": input_ids, "attention_mask": at_mask, "labels": labels})
+    print(f"[sft] prepared {len(samples)} samples (answer-only loss)")
 
-    training_args = SFTConfig(
+    class SFTDS(TDDataset):
+        def __init__(self, items): self.items = items
+        def __len__(self): return len(self.items)
+        def __getitem__(self, i): return self.items[i]
+    ds = SFTDS(samples)
+    train_ds, test_ds = (SFTDS(samples[:7]), SFTDS(samples[7:])) if len(samples) > 8 else (ds, None)
+
+    args = TrainingArguments(
         output_dir=out,
-        per_device_train_batch_size=2,
-        gradient_accumulation_steps=2,
+        per_device_train_batch_size=1,
+        gradient_accumulation_steps=4,
         warmup_ratio=0.05,
         num_train_epochs=epochs,
         learning_rate=2e-4,
         lr_scheduler_type="cosine",
         logging_steps=1,
-        eval_strategy="steps" if test else "no",
-        eval_steps=10,
+        eval_strategy="steps" if test_ds else "no",
+        eval_steps=5,
+        save_strategy="epoch",
+        bf16=True,
+        gradient_checkpointing=True,
+        report_to="none",
+        optim="adamw_8bit",
+        weight_decay=0.01,
+        max_grad_norm=0.3,
+        seed=42,
+    )
+    trainer = Trainer(model=model, args=args, train_dataset=train_ds,
+                      eval_dataset=test_ds, processing_class=tokenizer)
+    trainer.train()
+    adapter_dir  = os.path.join(out, "adapter")
+    merged_dir   = os.path.join(out, "merged")
+    model.save_pretrained(adapter_dir)
+    tokenizer.save_pretrained(adapter_dir)
+    merged = model.merge_and_unload()
+    merged.save_pretrained(merged_dir)
+    tokenizer.save_pretrained(merged_dir)
+    print(f"[sft] DONE  adapter={adapter_dir}  merged_hf={merged_dir}")
+    return merged_dir
+
+# ---------- DPO ----------
+def run_dpo(data, out, base, beta=0.1, epochs=1, max_seq_length=8192):
+    """Trainers-agnostic DPO. No trl. Loss = -logsigmoid( beta*(d_chosen - d_rejected) )
+    where d = seqlogp(policy) - seqlogp(reference), length-normalized."""
+    import torch
+    from torch.utils.data import Dataset as TDDataset
+    from transformers import Trainer, TrainingArguments
+    base = resolve_base(base)
+    print(f"[dpo] base = {base}  beta = {beta}")
+    model, tokenizer = load_model(base, max_seq_length)
+    model = add_lora(model)
+    model.enable_input_require_grads()
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+
+    def tokenize(prompt_msgs, completion_text):
+        p = tokenizer.apply_chat_template(prompt_msgs, tokenize=False, add_generation_prompt=True)
+        full = p + completion_text + tokenizer.eos_token
+        enc  = tokenizer(full, truncation=True, max_length=max_seq_length)
+        input_ids, at_mask = enc["input_ids"], enc["attention_mask"]
+        labels = [-100] * len(input_ids)
+        pl = len(tokenizer(p, truncation=True, max_length=max_seq_length)["input_ids"])
+        labels[pl:] = input_ids[pl:]
+        return {"input_ids": input_ids, "attention_mask": at_mask, "labels": labels}
+
+    rows = [json.loads(l) for l in open(data) if l.strip()]
+    pairs = [(tokenize(r["prompt"], r["chosen"]), tokenize(r["prompt"], r["rejected"])) for r in rows]
+    print(f"[dpo] {len(pairs)} chosen/rejected pairs")
+
+    class DPOTS(TDDataset):
+        def __len__(self): return len(pairs)
+        def __getitem__(self, i):
+            c, j = pairs[i]
+            return {
+                "c_input_ids": c["input_ids"], "c_attn": c["attention_mask"], "c_labels": c["labels"],
+                "j_input_ids": j["input_ids"], "j_attn": j["attention_mask"], "j_labels": j["labels"],
+            }
+    ds = DPOTS()
+
+    def seqlogp(model, input_ids, at_mask, labels):
+        out = model(input_ids=input_ids, attention_mask=at_mask)
+        logp = torch.log_softmax(out.logits.float(), dim=-1)
+        tgt  = torch.where(labels == -100, torch.zeros_like(labels), labels)
+        tok  = logp.gather(-1, tgt.unsqueeze(-1)).squeeze(-1)
+        valid = (labels != -100).float()
+        return (tok * valid).sum(-1), valid.sum(-1)
+
+    class DPO(Trainer):
+        def compute_loss(self, model, inputs, return_outputs=False, **kw):
+            ci, ca, cl = inputs["c_input_ids"], inputs["c_attn"], inputs["c_labels"]
+            ji, ja, jl = inputs["j_input_ids"], inputs["j_attn"], inputs["j_labels"]
+            with torch.no_grad():
+                model.disable_adapter_layers()
+                try:
+                    r_chosen,   r_cn = seqlogp(model, ci, ca, cl)
+                    r_rejected, r_jn = seqlogp(model, ji, ja, jl)
+                finally:
+                    model.enable_adapter_layers()
+            pol_chosen,   pcn = seqlogp(model, ci, ca, cl)
+            pol_rejected, pjm = seqlogp(model, ji, ja, jl)
+            # length-normalized log probability difference (stable when chosen is short,
+            # rejected is long — our DPO data)
+            d_c = (pol_chosen   - r_chosen)   / torch.clamp(pcn, min=1.0)
+            d_j = (pol_rejected - r_rejected) / torch.clamp(pjm, min=1.0)
+            margin = beta * (d_c - d_j)
+            loss   = -torch.nn.functional.logsigmoid(margin).mean()
+            if self.state.global_step % 5 == 0:
+                print(f"  [dpo step {self.state.global_step}] loss={loss.item():.4f} margin={margin.mean().item():.4f}", flush=True)
+            return loss
+    args = TrainingArguments(
+        output_dir=out,
+        per_device_train_batch_size=1,
+        gradient_accumulation_steps=8,
+        warmup_ratio=0.1,
+        num_train_epochs=epochs,
+        learning_rate=5e-7,
+        lr_scheduler_type="cosine",
+        logging_steps=1,
         save_strategy="epoch",
         bf16=True,
         report_to="none",
@@ -106,82 +204,21 @@ def run_sft(data, out, base, epochs=3, max_seq_length=8192):
         weight_decay=0.01,
         max_grad_norm=0.3,
         seed=42,
+        fp16=False,
     )
-    trainer = SFTTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=train,
-        eval_dataset=test,
-        data_collator=DataCollatorForCompletionOnlyLM(
-            completion_columns=["prompt", "completion"],
-            label_pad_token_id=-100,
-            tokenizer=tokenizer,
-        ),
-        processing_class=tokenizer,
-    )
+    trainer = DPO(model=model, args=args, train_dataset=ds, processing_class=tokenizer)
     trainer.train()
     adapter_dir = os.path.join(out, "adapter")
+    merged_dir  = os.path.join(out, "merged")
     model.save_pretrained(adapter_dir)
     tokenizer.save_pretrained(adapter_dir)
     merged = model.merge_and_unload()
-    merged_dir = os.path.join(out, "merged")
     merged.save_pretrained(merged_dir)
     tokenizer.save_pretrained(merged_dir)
-    print(f"[sft] DONE  adapter={adapter_dir}  merged_hf={merged_dir}")
+    print(f"[dpo] DONE  adapter={adapter_dir}  merged_hf={merged_dir}")
     return merged_dir
 
-def run_dpo(data, out, sft_merged, beta=0.1, epochs=1, max_seq_length=8192):
-    from datasets import Dataset
-    from trl import DPOTrainer, DPOConfig
-    base = resolve_base(sft_merged)
-    print(f"[dpo] base = {base}")
-    model, tokenizer = load_model(base, max_seq_length)
-    model = add_lora(model)
-    rows = [json.loads(l) for l in open(data) if l.strip()]
-    adapted = []
-    for r in rows:
-        prompt = tokenizer.apply_chat_template(r["prompt"], tokenize=False, add_generation_prompt=True)
-        adapted.append({"prompt": prompt, "chosen": r["chosen"], "rejected": r["rejected"]})
-    ds = Dataset.from_list(adapted)
-    test = None
-    if len(ds) > 4:
-        ds = ds.train_test_split(test_size=min(2, max(1, len(ds) // 10)), seed=7)
-        test = ds["test"]; train = ds["train"]
-    else:
-        train = ds
-    cfg = DPOConfig(
-        output_dir=out,
-        beta=beta,
-        loss_type="sigmoid",
-        max_length=max_seq_length,
-        max_prompt_length=max_seq_length - 2048,
-        per_device_train_batch_size=1,
-        gradient_accumulation_steps=4,
-        learning_rate=5e-7,
-        num_train_epochs=epochs,
-        bf16=True,
-        optim="adamw_8bit",
-        eval_strategy="steps" if test else "no",
-        eval_steps=10,
-        logging_steps=1,
-        save_strategy="epoch",
-        warmup_ratio=0.1,
-        report_to="none",
-        seed=42,
-    )
-    trainer = DPOTrainer(model=model, args=cfg, train_dataset=train,
-                         eval_dataset=test, processing_class=tokenizer)
-    trainer.train()
-    adapter_dir = os.path.join(out, "adapter")
-    model.save_pretrained(adapter_dir)
-    tokenizer.save_pretrained(adapter_dir)
-    merged = model.merge_and_unload()
-    merged_dir = os.path.join(out, "merged")
-    merged.save_pretrained(merged_dir)
-    tokenizer.save_pretrained(merged_dir)
-    print(f"[dpo] DONE  merged_hf={merged_dir}")
-    return merged_dir
-
+# ---------- GGUF export ----------
 def run_export(hf_dir, out, bits=4):
     base = resolve_base(hf_dir)
     print(f"[export] hf = {base}  quant = Q{bits}_K_M")
@@ -189,11 +226,11 @@ def run_export(hf_dir, out, bits=4):
         model_name=base, max_seq_length=8192, dtype=None, token=None)
     os.makedirs(out, exist_ok=True)
     try:
-        model.save_pretrained_gguf(out, {"quantization_bit": bits})      # unsloth >= 2025 style
+        model.save_pretrained_gguf(out, {"quantization_bit": bits})     # unsloth >= 2025
     except TypeError:
-        model.save_pretrained_gguf(out, bits)                             # older style: position bit
+        model.save_pretrained_gguf(out, bits)                            # older signature
     tokenizer.save_pretrained(os.path.join(out, "tokenizer"))
-    print(f"[export] DONE  GGUF in {out} — point a Modelfile FROM line at the .gguf file there")
+    print(f"[export] DONE  GGUF in {out} — Modelfile FROM points at the .gguf file")
 
 def main():
     ap = argparse.ArgumentParser()
@@ -201,7 +238,7 @@ def main():
     ap.add_argument("--data", help="jsonl (sft or dpo rows)")
     ap.add_argument("--sft",  help="path to merged HF dir (dpo stage: smoke/merged)")
     ap.add_argument("--model", default="Qwen/Qwen3.5-9B",
-                    help="HF base repo id (qwen3.5:9b / qwen3:8b tags accepted and mapped)")
+                    help="HF repo id (qwen3.5:9b / qwen3:8b tags mapped via MODEL_ALIASES)")
     ap.add_argument("--out", required=True, help="output dir on node7")
     ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--dpo-beta", type=float, default=0.1)
@@ -210,7 +247,7 @@ def main():
     if a.stage == "sft":
         if not a.data: sys.exit("--data required for sft")
         run_sft(a.data, a.out, a.model, a.epochs)
-    elif a.stage == "dpo":
+    elif "dpo" == a.stage:
         if not a.sft or not a.data: sys.exit("--sft and --data required for dpo")
         run_dpo(a.data, a.out, a.sft, a.dpo_beta, a.epochs)
     elif a.stage == "export":
