@@ -26,6 +26,29 @@ import argparse, json, re, sys
 from collections import defaultdict
 
 HEDGE = re.compile(r"\b(likely|probably|might|maybe|perhaps|possibly|seems?|appears?|presumably)\b", re.I)
+# Abstention gold = a genuine "I have no information" refusal.
+REFUSAL = re.compile(
+    r"no (stored |existing )?information|nothing (stored|(in|on|about) (my )?(record|notes?|memory)|on|about)|"
+    r"not stored|no (note|notes|record|entry|data|evidence)|no way to (know|tell|verify)|"
+    r"i can't (confirm|verify|say|be sure|see)|i (have no |doesn't have) "
+    r"|we don't (have|know)|no record", re.I)
+
+# Match the EXACT prompt the base model (rejected) was generated under, so chosen &
+# rejected share one prompt and training matches Honcho's runtime distribution.
+try:
+    from honcho_prompt import agent_system_prompt as _agent_sp
+    _TOOLS = ["search_memory","search_messages","grep_messages","get_reasoning_chain",
+              "get_observation_context","get_messages_by_date_range","search_messages_temporal"]
+    def ctx_system(c):
+        cache = "\n".join(f"- [{f['date']}] {f['text']}" for f in c.get("findings", []))
+        return (_agent_sp("Daniel","Daniel",None,None,_TOOLS)
+                + "\n\n## RETRIEVAL CACHE (results already gathered — do NOT re-search)\n"
+                + cache + "\n").strip()
+except Exception:  # honcho_prompt unavailable: fallback to a findings-in-user prompt
+    def ctx_system(c):
+        cache = "\n".join(f"- [{f['date']}] {f['text']}" for f in c.get("findings", []))
+        return ("You are Honcho's dialectic: answer tersely, fully grounded in the provided "
+                "findings, no preamble, no search narration.\n\n## FINDINGS\n" + cache + "\n")
 
 def load(p): return {json.loads(l)["id"]: json.loads(l) for l in open(p) if l.strip()}
 
@@ -58,17 +81,27 @@ def main():
         if c_w > 120: dropped["chosen_too_long"] += 1; continue
         if r_w / max(1, c_w) < 1.5: dropped["low_ratio(<1.5)"] += 1; continue
         cat = c.get("category")
+        # Key fix vs v0.2: supersession/contradiction CORRECT answers must name BOTH the
+        # new and the old value ("115, down from 120"; "8+ updated from 10+"), so an
+        # assertive "forbidden_fact" mention is NOT fabrication when the required_fact is
+        # also present. Only a TRUE fabrication (required absent, forbidden asserted) drops.
         if cat == "abstention":
-            if any(has_entity(c_ans, fe) for fe in findings_entities(c)):
-                dropped["abstention_leakage"] += 1; continue
+            # A correct abstention is a genuine "no information" refusal that names the
+            # topic. The old findings-leak gate killed legitimate refusals ("no info on
+            # Alzheimer's") because they mention the subject word.
+            if not REFUSAL.search(c_ans):
+                dropped["abst_not_refusal"] += 1; continue
         else:
-            req = c.get("required_facts") or []
-            if not req or not any(has_entity(c_ans, e) for e in req):
+            req = [e for e in (c.get("required_facts") or [])]
+            req_ok = bool(req) and any(has_entity(c_ans, e) for e in req)
+            if not req_ok:
                 dropped["no_required_fact"] += 1; continue
             forb = c.get("forbidden_facts") or []
-            if any(has_entity(c_ans, e) for e in forb):
-                dropped["asserts_forbidden"] += 1; continue
-        if HEDGE.search(c_ans): dropped["hedge_in_chosen"] += 1; continue
+            if forb and not req_ok and any(has_entity(c_ans, e) for e in forb):
+                dropped["fabrication"] += 1; continue
+        # HEDGE gate removed: Opus batch answers are declarative, and words in the set
+        # legitimately appear in correct lines ("...the guideline appears in the preface").
+        # Correctness is already enforced by required_fact + no-fabrication above.
         kept.append({"id": cid, "persona": c.get("persona"), "question": c["question"],
                      "category": cat, "chosen": c_ans, "rejected": r_ans})
 
@@ -84,13 +117,20 @@ def main():
     def write(name, rows, fmt):
         out = []
         for k in rows:
+            c = ctx[k["id"]]
+            sysp = ctx_system(c)
+            user = c["question"]
             if fmt == "sft":
                 out.append({"messages": [
-                    {"role": "system", "content": "You are Honcho's dialectic. Answer tersely (1-3 short sentences), fully grounded in the findings, no preamble, no search narration."},
-                    {"role": "user", "content": k["question"]},
-                    {"role": "assistant", "content": k["chosen"]}]})
+                    {"role": "system", "content": sysp},
+                    {"role": "user", "content": user},
+                    {"role": "assistant", "content": k["chosen"]}
+                ]})
             elif fmt == "dpo":
-                out.append({"prompt": k["question"], "chosen": k["chosen"], "rejected": k["rejected"], "category": k["category"]})
+                out.append({"prompt": [
+                    {"role": "system", "content": sysp},
+                    {"role": "user", "content": user},
+                ], "chosen": k["chosen"], "rejected": k["rejected"], "category": k["category"]})
         open(f"{a.out}_{name}.{fmt}.jsonl", "w").write("\n".join(json.dumps(o) for o in out) + "\n")
         return len(out)
 
