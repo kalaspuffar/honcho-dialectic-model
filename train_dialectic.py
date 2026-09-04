@@ -41,12 +41,12 @@ def resolve_base(name: str) -> str:
         return n
     return MODEL_ALIASES.get(n, n)
 
-def load_model(base, max_seq_length=8192):
+def load_model(base, max_seq_length=8192, bits=16):
     return FastLanguageModel.from_pretrained(
         model_name=base,
         max_seq_length=max_seq_length,
-        dtype=None,          # bf16 via Unsloth
-        load_in_8bit=False,
+        dtype=None,               # bf16 weights
+        load_in_4bit=bool(bits and bits == 4),   # 12 GB 3080 Ti: 4-bit base for 8B fits
         token=None,
     )
 
@@ -63,13 +63,14 @@ def add_lora(model, r=16):
     )
 
 # ---------- SFT ----------
-def run_sft(data, out, base, epochs=3, max_seq_length=8192):
+def run_sft(data, out, base, epochs=3, max_seq_length=8192, bits=16):
     from torch.utils.data import Dataset as TDDataset
     from transformers import Trainer, TrainingArguments
     base = resolve_base(base)
     print(f"[sft] base = {base}")
-    model, tokenizer = load_model(base, max_seq_length)
+    model, tokenizer = load_model(base, max_seq_length, bits)
     model = add_lora(model)
+    print(f"[sft] base bits flag: {bits}")
 
     rows = [json.loads(l) for l in open(data) if l.strip()]
     samples = []
@@ -127,7 +128,7 @@ def run_sft(data, out, base, epochs=3, max_seq_length=8192):
     return merged_dir
 
 # ---------- DPO ----------
-def run_dpo(data, out, base, beta=0.1, epochs=1, max_seq_length=8192):
+def run_dpo(data, out, base, beta=0.1, epochs=1, max_seq_length=8192, bits=16):
     """Trainers-agnostic DPO. No trl. Loss = -logsigmoid( beta*(d_chosen - d_rejected) )
     where d = seqlogp(policy) - seqlogp(reference), length-normalized."""
     import torch
@@ -135,7 +136,7 @@ def run_dpo(data, out, base, beta=0.1, epochs=1, max_seq_length=8192):
     from transformers import Trainer, TrainingArguments
     base = resolve_base(base)
     print(f"[dpo] base = {base}  beta = {beta}")
-    model, tokenizer = load_model(base, max_seq_length)
+    model, tokenizer = load_model(base, max_seq_length, bits)
     model = add_lora(model)
     model.enable_input_require_grads()
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
@@ -248,15 +249,17 @@ def main():
                          "qwen3.5:9b maps to Qwen3-8B because Qwen/Qwen3.5-9B is a VL model.")
     ap.add_argument("--out", required=True, help="output dir on node7")
     ap.add_argument("--epochs", type=int, default=3)
+    ap.add_argument("--load-bits", type=int, default=4, choices=[4, 16],
+                    help="load base at 4-bit (fit 12 GB 3080 Ti) or 16-bit (needs ~24 GB)")
     ap.add_argument("--dpo-beta", type=float, default=0.1)
     ap.add_argument("--bits", type=int, default=4, choices=[4, 8], help="GGUF bits for export")
     a = ap.parse_args()
     if a.stage == "sft":
         if not a.data: sys.exit("--data required for sft")
-        run_sft(a.data, a.out, a.model, a.epochs)
+        run_sft(a.data, a.out, a.model, a.epochs, a.load_bits)
     elif "dpo" == a.stage:
         if not a.sft or not a.data: sys.exit("--sft and --data required for dpo")
-        run_dpo(a.data, a.out, a.sft, a.dpo_beta, a.epochs)
+        run_dpo(a.data, a.out, a.sft, a.dpo_beta, a.epochs, a.load_bits)
     elif a.stage == "export":
         if not a.model: sys.exit("--model (merged HF dir) required for export")
         run_export(a.model, a.out, a.bits)
