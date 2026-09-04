@@ -1,0 +1,10 @@
+keys.env
+trial/
+results/
+raw-dumps/
+*_train.*.jsonl
+*_eval.*.jsonl
+conversations.jsonl
+context_pool.jsonl
+*.gguf
+__pycache__/
