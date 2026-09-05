@@ -257,6 +257,9 @@ def run_dpo(data, out, base, beta=0.1, epochs=1, max_seq_length=4096, bits=4, ma
         output_dir=out,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=8,
+        remove_unused_columns=False,   # trl does this too: our c_*/j_* keys aren't in
+                                      # Qwen3 forward()'s signature, so RemoveColumnsCollator
+                                      # (default ON) stripped all six -> empty batch in _prepare_inputs
         warmup_steps=2,
         num_train_epochs=epochs,
         learning_rate=5e-7,
