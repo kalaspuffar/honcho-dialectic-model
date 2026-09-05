@@ -76,6 +76,26 @@ def add_lora(model, r=16):
         use_gradient_checkpointing="unsloth",
     )
 
+# shared: pad a list of ragged token rows to batch-max (labels pad with -100,
+# other id fields with pad_id/0) — transformers' stock DataCollatorWithPadding
+# builds tensors from ragged lists and raises "enable truncation/padding" when
+# lengths differ (attempt 5: eval batch=8 hit exactly this).
+def pad_collator(pad_label=True, pad_id=None):
+    def collate(batch):
+        out = {}
+        for k in batch[0]:
+            rows = [b[k] for b in batch]
+            L = max(len(r) for r in rows)
+            if k == "labels" and pad_label:
+                fill = -100
+            elif k in ("input_ids", "c_input_ids", "j_input_ids"):
+                fill = (pad_id if pad_id is not None else 0)
+            else:                       # attention masks: pad 0
+                fill = 0
+            out[k] = [[fill] * (L - len(r)) + r for r in rows]
+        return out
+    return collate
+
 # ---------- SFT ----------
 def run_sft(data, out, base, epochs=3, max_seq_length=4096, bits=4, max_seq=None):
     from torch.utils.data import Dataset as TDDataset
@@ -120,6 +140,7 @@ def run_sft(data, out, base, epochs=3, max_seq_length=4096, bits=4, max_seq=None
         logging_steps=1,
         eval_strategy="steps" if test_ds else "no",
         eval_steps=5,
+        per_device_eval_batch_size=1,
         save_strategy="epoch",
         bf16=True,
         gradient_checkpointing=True,
@@ -130,7 +151,8 @@ def run_sft(data, out, base, epochs=3, max_seq_length=4096, bits=4, max_seq=None
         seed=42,
     )
     trainer = Trainer(model=model, args=args, train_dataset=train_ds,
-                      eval_dataset=test_ds, processing_class=tokenizer)
+                      eval_dataset=test_ds, processing_class=tokenizer,
+                      data_collator=pad_collator(pad_label=True, pad_id=tokenizer.pad_token_id))
     trainer.train()
     adapter_dir  = os.path.join(out, "adapter")
     merged_dir   = os.path.join(out, "merged")
@@ -229,7 +251,8 @@ def run_dpo(data, out, base, beta=0.1, epochs=1, max_seq_length=4096, bits=4, ma
         seed=42,
         fp16=False,
     )
-    trainer = DPO(model=model, args=args, train_dataset=ds, processing_class=tokenizer)
+    trainer = DPO(model=model, args=args, train_dataset=ds, processing_class=tokenizer,
+                 data_collator=pad_collator(pad_label=False, pad_id=tokenizer.pad_token_id))
     trainer.train()
     adapter_dir = os.path.join(out, "adapter")
     merged_dir  = os.path.join(out, "merged")
