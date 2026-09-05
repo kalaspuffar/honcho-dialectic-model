@@ -15,19 +15,24 @@
 - `Modelfile` — Ollama Modelfile template; `FROM` line is a placeholder that gets filled in once Unsloth hands off.
 - Code: `honcho_prompt.py`, `base_answer_probe.py`, `build_dataset.py` (v0.4.0, fixed), `run_rejected.py` (stdlib-only, added this turn).
 
-## 1. On node7 — check before running
+## 2. On node7 — check before running
 ```bash
 ssh node7
 # 1a. GPU idle, no other workloads
 nvidia-smi
-# 1b. Unsloth + deps present (Daniel's deriver run should have these)
+#   Node7: RTX A6000 48 GB (per memory card; if that has shifted, re-check)
+#   3080 Ti host: 11.6 GB — use --load-bits 4 --max-seq 4096 (default)
+# 1b. Unsloth + deps present
 python3 -c "import unsloth, transformers, torch, trl; \
   print('unsloth',unsloth.__version__,'| transformers',transformers.__version__,\
         '| torch',torch.__version__,'| trl',trl.__version__)"
+#   Known-good in this venv (2026-09-04): unsloth 2026.9.2, transformers 5.5.0,
+#   torch 2.11.0+cu130, CUDA 13.0. If trl is <1.2, the script still runs (v0.7
+#   removed the trl dependency from SFT+DPO entirely).
 # 1c. Base model present
 ollama list | grep -E 'qwen3\.'
-#   qwen3.5:9b    9.7B   Q4_K_M   <-- this one (DPO base per PLAN §3.1)
-#   qwen3:8b      8.2B   Q4_K_M   <-- fallback if qwen3.5 hits LoRA snag (known from deriver)
+#   qwen3.5:9b    <-- VL model, do NOT use for text DPO (see v0.5.2 notes)
+#   qwen3:8b      <-- deriver-proven text base (this is what we train on)
 ```
 
 If `unsloth` is not on node7, first do `pip install -U unsloth` in the same python env that ran the deriver.
@@ -112,7 +117,8 @@ Once a checkpoint passes Gate 1 AND the 30-context eval, the pipeline is:
 |---|---|---|---|
 | 2026-09-04 | sft (attempt 1) | `HFValidationError: Repo id ... 'qwen3.5:9b'` — `qwen3.5:9b` is an Ollama tag; Unsloth loads from the HF Hub. Also import-order warning (unsloth must be imported first). | Script v0.5.0: `import unsloth` first + `MODEL_ALIASES` maps `qwen3.5:9b -> Qwen/Qwen3.5-9B`. Re-run the same §3 command. |
 | 2026-09-04 | sft (attempt 3) | `PIL.UnidentifiedImageError` — `Qwen/Qwen3.5-9B` is an **image-text-to-text (VL)** model (confirmed via Hub API: pipeline_tag `image-text-to-text`); Unsloth loaded a `Qwen3VLProcessor` and tried to read the prompt as an image. | v0.5.2: default + aliases now anchor on the text-only **`Qwen/Qwen3-8B`** (deriver-proven, `text-generation`). The 9B class has no official text-only build; community options listed in the script if we ever want the 9B class specifically. |
-| 2026-09-04 | env | Unsloth banner shows the run host is **RTX 3080 Ti, 11.6 GB** (not A6000 48GB as previously assumed). | Batch 1 + gradient checkpointing + 4-bit base are mandatory. If OOM: load `--model unsloth/Qwen3-8B-GGUF` (4-bit) instead of the BF16 repo, or raise `--max-seq` only if RAM allows. |
+| 2026-09-04 | sft (attempt 4) | `torch.AcceleratorError: CUDA error: an illegal memory access was encountered` at `fast_lora.py → matmul_lora → addmm_` — Unsloth's custom fast-LoRA kernels + bf16 base offloaded to CPU on the 12 GB 3080 Ti. | v0.7.0: 4-bit base is now the *default* (`load_in_4bit=True` when `--load-bits 4`), `use_fast_lora=False` in `add_lora` (fall back to standard matmul path — slower but correct), `max_seq_length` default 4096 (down from 8192), `warmup_steps` instead of deprecated `warmup_ratio` (transformers 5.5). `--max-seq` and `--load-bits` are now real flags; run on the 3080 Ti with 4/4096, or on node7 A6000 with `--load-bits 16 --max-seq 8192`. |
+| 2026-09-04 | env | Run host identified: a **3080 Ti box (11.6 GB)**, not the A6000. Daniel wants to keep node7 (A6000) for the full-scale run later. | All smoke-test defaults tuned for the 12 GB card. A6000 48 GB variant is documented in the failure log and in TRAIN.md §2 with the exact `--load-bits 16 --max-seq 8192` flag pair. |
 
 ## 8. Files to keep in sync
 - **Data** (`smoke10_sft.jsonl`, `smoke10_dpo.jsonl`, `dataset_*.jsonl`): lives here, git-ignored. Rebuild any time with:

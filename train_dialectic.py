@@ -51,9 +51,13 @@ def load_model(base, max_seq_length=8192, bits=16):
     )
 
 def add_lora(model, r=16):
+    # use_fast_lora=False: disable the custom matmul kernels
+    # (fast_lora.py matmul_lora crash on 12 GB 3080 Ti with 16-bit offloaded base).
+    # Cost: ~1.5x slower on this step — fine for a 6-12 step smoke run.
     return FastLanguageModel.get_peft_model(
         model,
         r=r,
+        use_fast_lora=False,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                         "gate_proj", "up_proj", "down_proj"],
         lora_alpha=32,
@@ -63,14 +67,15 @@ def add_lora(model, r=16):
     )
 
 # ---------- SFT ----------
-def run_sft(data, out, base, epochs=3, max_seq_length=8192, bits=16):
+def run_sft(data, out, base, epochs=3, max_seq_length=4096, bits=4, max_seq=None):
     from torch.utils.data import Dataset as TDDataset
     from transformers import Trainer, TrainingArguments
     base = resolve_base(base)
     print(f"[sft] base = {base}")
+    if max_seq is not None: max_seq_length = max_seq
     model, tokenizer = load_model(base, max_seq_length, bits)
     model = add_lora(model)
-    print(f"[sft] base bits flag: {bits}")
+    print(f"[sft] base={base} bits={bits} max_seq={max_seq_length}")
 
     rows = [json.loads(l) for l in open(data) if l.strip()]
     samples = []
@@ -98,7 +103,7 @@ def run_sft(data, out, base, epochs=3, max_seq_length=8192, bits=16):
         output_dir=out,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=4,
-        warmup_ratio=0.05,
+        warmup_steps=2,
         num_train_epochs=epochs,
         learning_rate=2e-4,
         lr_scheduler_type="cosine",
@@ -128,14 +133,15 @@ def run_sft(data, out, base, epochs=3, max_seq_length=8192, bits=16):
     return merged_dir
 
 # ---------- DPO ----------
-def run_dpo(data, out, base, beta=0.1, epochs=1, max_seq_length=8192, bits=16):
+def run_dpo(data, out, base, beta=0.1, epochs=1, max_seq_length=4096, bits=4, max_seq=None):
     """Trainers-agnostic DPO. No trl. Loss = -logsigmoid( beta*(d_chosen - d_rejected) )
     where d = seqlogp(policy) - seqlogp(reference), length-normalized."""
     import torch
     from torch.utils.data import Dataset as TDDataset
     from transformers import Trainer, TrainingArguments
     base = resolve_base(base)
-    print(f"[dpo] base = {base}  beta = {beta}")
+    if max_seq is not None: max_seq_length = max_seq
+    print(f"[dpo] base={base} beta={beta} bits={bits} max_seq={max_seq_length}")
     model, tokenizer = load_model(base, max_seq_length, bits)
     model = add_lora(model)
     model.enable_input_require_grads()
@@ -199,7 +205,7 @@ def run_dpo(data, out, base, beta=0.1, epochs=1, max_seq_length=8192, bits=16):
         output_dir=out,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=8,
-        warmup_ratio=0.1,
+        warmup_steps=2,
         num_train_epochs=epochs,
         learning_rate=5e-7,
         lr_scheduler_type="cosine",
@@ -249,6 +255,8 @@ def main():
                          "qwen3.5:9b maps to Qwen3-8B because Qwen/Qwen3.5-9B is a VL model.")
     ap.add_argument("--out", required=True, help="output dir on node7")
     ap.add_argument("--epochs", type=int, default=3)
+    ap.add_argument("--max-seq", type=int, default=4096,
+                    help="max tokens per sample. 4096 for 12 GB cards; raise to 8192 on 48 GB")
     ap.add_argument("--load-bits", type=int, default=4, choices=[4, 16],
                     help="load base at 4-bit (fit 12 GB 3080 Ti) or 16-bit (needs ~24 GB)")
     ap.add_argument("--dpo-beta", type=float, default=0.1)
@@ -256,10 +264,12 @@ def main():
     a = ap.parse_args()
     if a.stage == "sft":
         if not a.data: sys.exit("--data required for sft")
-        run_sft(a.data, a.out, a.model, a.epochs, a.load_bits)
+        run_sft(data=a.data, out=a.out, base=a.model, epochs=a.epochs,
+        bits=a.load_bits, max_seq=a.max_seq)
     elif "dpo" == a.stage:
         if not a.sft or not a.data: sys.exit("--sft and --data required for dpo")
-        run_dpo(a.data, a.out, a.sft, a.dpo_beta, a.epochs, a.load_bits)
+        run_dpo(data=a.data, out=a.out, base=a.sft, beta=a.dpo_beta, epochs=a.epochs,
+        bits=a.load_bits, max_seq=a.max_seq)
     elif a.stage == "export":
         if not a.model: sys.exit("--model (merged HF dir) required for export")
         run_export(a.model, a.out, a.bits)
