@@ -295,14 +295,15 @@ def run_export(hf_dir, out, bits=4):
         model_name=base, max_seq_length=8192, dtype=None, token=None)
     os.makedirs(out, exist_ok=True)
     # save_pretrained_gguf(self, save_directory, tokenizer=None, quantization_method="fast_quantized", ...)
+    # — Unsloth attaches it per-instance (types.MethodType + @functools.wraps), so it is
+    #   NOT in the class dict: introspect the BOUND method, not type(model).
     # — `tokenizer` is the 2nd POSITIONAL (passing a dict/int there = the
     #   'dict'/'int' object is not callable crash of 2026-09-05), and the
     #   quant kwarg name varies across releases (quantization_method vs
-    #   quantization_bit), so introspect once and pick the right key
-    #   instead of trying every call-form.
+    #   quantization_bit), so introspect once and pick the right key instead
+    #   of trying every call-form.
     import inspect
-    sig = inspect.signature(type(model).save_pretrained_gguf)
-    params = sig.parameters
+    params = inspect.signature(model.save_pretrained_gguf).parameters
     if "quantization_method" in params:
         model.save_pretrained_gguf(out, tokenizer, quantization_method=f"q{bits}_k_m")
     elif "quantization_bit" in params:
