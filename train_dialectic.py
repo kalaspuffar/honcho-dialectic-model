@@ -217,6 +217,21 @@ def run_dpo(data, out, base, beta=0.1, epochs=1, max_seq_length=4096, bits=4, ma
         return (tok * valid).sum(-1), valid.sum(-1)
 
     class DPO(Trainer):
+        def get_batch_samples(self, epoch_iterator, num_batches, device, *a, **kw):
+            # Match stock Trainer.get_batch_samples: collect up to num_batches collated
+            # batches (our c_*/j_* dicts) and return (list, num_items_in_batch).
+            # Unsloth's _unsloth_get_batch_samples reassembles from a fixed key set
+            # (input_ids/attention_mask/labels/position_ids) and drops our custom keys,
+            # producing the empty-dict that trips _prepare_inputs' "batch was empty" guard.
+            # Returning num_items_in_batch=None lets the standard loss scaling (divide by
+            # full gradient_accumulation_steps) apply, as it does without Unsloth.
+            batch_samples = []
+            for _ in range(num_batches):
+                try:
+                    batch_samples.append(next(epoch_iterator))
+                except StopIteration:
+                    break
+            return batch_samples, None
         def compute_loss(self, model, inputs, return_outputs=False, **kw):
             ci, ca, cl = inputs["c_input_ids"], inputs["c_attn"], inputs["c_labels"]
             ji, ja, jl = inputs["j_input_ids"], inputs["j_attn"], inputs["j_labels"]
