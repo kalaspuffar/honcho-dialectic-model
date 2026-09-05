@@ -80,17 +80,17 @@ def add_lora(model, r=16):
 # other id fields with pad_id/0) — transformers' stock DataCollatorWithPadding
 # builds tensors from ragged lists and raises "enable truncation/padding" when
 # lengths differ (attempt 5: eval batch=8 hit exactly this).
-def pad_collator(pad_label=True, pad_id=None):
+def pad_collator(pad_id=None):
     def collate(batch):
         out = {}
         for k in batch[0]:
             rows = [b[k] for b in batch]
             L = max(len(r) for r in rows)
-            if k == "labels" and pad_label:
-                fill = -100
+            if k == "labels" or k.endswith("_labels"):
+                fill = -100                     # masked loss positions must stay masked
             elif k in ("input_ids", "c_input_ids", "j_input_ids"):
                 fill = (pad_id if pad_id is not None else 0)
-            else:                       # attention masks: pad 0
+            else:                               # attention masks: pad 0
                 fill = 0
             out[k] = [[fill] * (L - len(r)) + r for r in rows]
         return out
@@ -152,7 +152,7 @@ def run_sft(data, out, base, epochs=3, max_seq_length=4096, bits=4, max_seq=None
     )
     trainer = Trainer(model=model, args=args, train_dataset=train_ds,
                       eval_dataset=test_ds, processing_class=tokenizer,
-                      data_collator=pad_collator(pad_label=True, pad_id=tokenizer.pad_token_id))
+                      data_collator=pad_collator(pad_id=tokenizer.pad_token_id))
     trainer.train()
     adapter_dir  = os.path.join(out, "adapter")
     merged_dir   = os.path.join(out, "merged")
@@ -252,7 +252,7 @@ def run_dpo(data, out, base, beta=0.1, epochs=1, max_seq_length=4096, bits=4, ma
         fp16=False,
     )
     trainer = DPO(model=model, args=args, train_dataset=ds, processing_class=tokenizer,
-                 data_collator=pad_collator(pad_label=False, pad_id=tokenizer.pad_token_id))
+                 data_collator=pad_collator(pad_id=tokenizer.pad_token_id))
     trainer.train()
     adapter_dir = os.path.join(out, "adapter")
     merged_dir  = os.path.join(out, "merged")
