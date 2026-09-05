@@ -294,16 +294,21 @@ def run_export(hf_dir, out, bits=4):
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=base, max_seq_length=8192, dtype=None, token=None)
     os.makedirs(out, exist_ok=True)
-    # save_pretrained_gguf signature differs across unsloth builds;
-    # try the modern dict-form first, fall back to positional bit count,
-    # then to a quant-method-only kwarg
-    try:
-        model.save_pretrained_gguf(out, {"quantization_bit": bits})  # >=2025
-    except TypeError:
-        try:
-            model.save_pretrained_gguf(out, bits)                    # older positional
-        except TypeError:
-            model.save_pretrained_gguf(out, {"quantization_method": f"Q{bits}_K_M"})
+    # save_pretrained_gguf(self, save_directory, tokenizer=None, quantization_method="fast_quantized", ...)
+    # — `tokenizer` is the 2nd POSITIONAL (passing a dict/int there = the
+    #   'dict'/'int' object is not callable crash of 2026-09-05), and the
+    #   quant kwarg name varies across releases (quantization_method vs
+    #   quantization_bit), so introspect once and pick the right key
+    #   instead of trying every call-form.
+    import inspect
+    sig = inspect.signature(type(model).save_pretrained_gguf)
+    params = sig.parameters
+    if "quantization_method" in params:
+        model.save_pretrained_gguf(out, tokenizer, quantization_method=f"q{bits}_k_m")
+    elif "quantization_bit" in params:
+        model.save_pretrained_gguf(out, tokenizer, quantization_bit=bits)
+    else:
+        model.save_pretrained_gguf(out, tokenizer)   # default fast_quantized (~q4_k_m)
     tokenizer.save_pretrained(os.path.join(out, "tokenizer"))
     print(f"[export] DONE  GGUF in {out} — Modelfile FROM points at the .gguf file")
 
