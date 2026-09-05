@@ -92,7 +92,12 @@ def pad_collator(pad_id=None):
                 fill = (pad_id if pad_id is not None else 0)
             else:                               # attention masks: pad 0
                 fill = 0
-            out[k] = [[fill] * (L - len(r)) + r for r in rows]
+            padded = [[fill] * (L - len(r)) + r for r in rows]
+            try:
+                import torch
+                out[k] = torch.tensor(padded, dtype=torch.int64)   # Unsloth's get_batch_samples
+            except Exception:                   # tensorizes only if torch is importable;
+                out[k] = padded                 # list fallback (transformers' dataloader still works)
         return out
     return collate
 
