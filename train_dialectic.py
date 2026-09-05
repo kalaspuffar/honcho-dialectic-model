@@ -42,22 +42,32 @@ def resolve_base(name: str) -> str:
     return MODEL_ALIASES.get(n, n)
 
 def load_model(base, max_seq_length=8192, bits=16):
-    return FastLanguageModel.from_pretrained(
+    # load_in_4bit / dtype are the stable documented knobs; guard with a
+    # try/except TypeError so an unexpected signature on this build (2026.9.2)
+    # can't kill the run — the base repo is bf16 either way, we just prefer 4-bit
+    # on a 12 GB card.
+    kwargs = dict(
         model_name=base,
         max_seq_length=max_seq_length,
-        dtype=None,               # bf16 weights
-        load_in_4bit=bool(bits and bits == 4),   # 12 GB 3080 Ti: 4-bit base for 8B fits
+        dtype=None,
         token=None,
     )
+    try:
+        return FastLanguageModel.from_pretrained(**kwargs, **({"load_in_4bit": bits == 4} if bits is not None else {}))
+    except TypeError as e:
+        if "load_in_4bit" in str(e):
+            print(f"[load] load_in_4bit kwarg rejected ({e}); retrying without", flush=True)
+            return FastLanguageModel.from_pretrained(**kwargs)
+        raise
 
 def add_lora(model, r=16):
-    # use_fast_lora=False: disable the custom matmul kernels
-    # (fast_lora.py matmul_lora crash on 12 GB 3080 Ti with 16-bit offloaded base).
-    # Cost: ~1.5x slower on this step — fine for a 6-12 step smoke run.
+    # NOTE: unsloth 2026.9.2's get_peft_model has no use_fast_lora flag (checked
+    # against the official QLoRA guide). The crash in attempt 4 (fast_lora.py
+    # matmul_lora illegal memory access) is addressed here by keeping the base at
+    # 4-bit (no CPU offload) and capping max_seq_length, not by patching kernels.
     return FastLanguageModel.get_peft_model(
         model,
         r=r,
-        use_fast_lora=False,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                         "gate_proj", "up_proj", "down_proj"],
         lora_alpha=32,
@@ -238,10 +248,16 @@ def run_export(hf_dir, out, bits=4):
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=base, max_seq_length=8192, dtype=None, token=None)
     os.makedirs(out, exist_ok=True)
+    # save_pretrained_gguf signature differs across unsloth builds;
+    # try the modern dict-form first, fall back to positional bit count,
+    # then to a quant-method-only kwarg
     try:
-        model.save_pretrained_gguf(out, {"quantization_bit": bits})     # unsloth >= 2025
+        model.save_pretrained_gguf(out, {"quantization_bit": bits})  # >=2025
     except TypeError:
-        model.save_pretrained_gguf(out, bits)                            # older signature
+        try:
+            model.save_pretrained_gguf(out, bits)                    # older positional
+        except TypeError:
+            model.save_pretrained_gguf(out, {"quantization_method": f"Q{bits}_K_M"})
     tokenizer.save_pretrained(os.path.join(out, "tokenizer"))
     print(f"[export] DONE  GGUF in {out} — Modelfile FROM points at the .gguf file")
 
