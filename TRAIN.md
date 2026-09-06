@@ -144,7 +144,7 @@ leftover from the dead-end VL attempt — rename before publishing anywhere.
 | median words | 61 | 68 | +7 (slightly **more** verbose) |
 | mean entity coverage | 0.638 | 0.689 | **+0.051 (real but small)** |
 | fabrication rows | 0 | 1 | +1 |
-| abstention correct | 0/3 | 0/3 | unchanged — **both fail abstention** |
+| abstention correct | 0/3 (pending re-run; first pass pre-dated the scorer fix) | **1/3** (corrected rule: 025 was a valid refusal the old rule mis-scored) | — |
 | hedge rows | 1 | 1 | unchanged |
 
 **Interpretation:** the pipeline works, but the 10-pair smoke did NOT produce a usable
