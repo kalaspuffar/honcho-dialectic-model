@@ -21,17 +21,24 @@ import argparse, json, os, sys
 
 from unsloth import FastLanguageModel  # noqa: E402
 
+TEXT_ONLY_9B_REPO = "principled-intelligence/Qwen3.5-9B-text-only"
+# Set by --text-only-qwen35: routes the Qwen3-8B aliases to the community
+# Qwen3.5 text-only checkpoint. NOT a default — the 8B base is what the
+# pipeline is proven on; flip it only when testing the 9B class.
+_PREFERRED_BASE: dict = {"repo": None}
+
+def preferred_base():
+    return _PREFERRED_BASE.get("repo")
+
 MODEL_ALIASES = {
-    # Qwen/Qwen3.5-9B is an image-text-to-text (VL) model — Unsloth loads a
-    # Qwen3VLProcessor on it and chokes on text-only rows (attempt-3). Do NOT
-    # point a text SFT/DPO at it. The Qwen3.5 9B class has no official text-only
-    # build at the Qwen org, so the smoke anchors on the deriver-proven text base.
-    "qwen3.5:9b":  "Qwen/Qwen3-8B",   # -> text-only Qwen3-8B (see note above)
+    # Qwen/Qwen3.5-9B is image-text-to-text (VL) — Unsloth loads a
+    # Qwen3VLProcessor on it and chokes on text-only rows (attempt-3).
+    # The community text-only 9B build (Qwen3_5ForCausalLM, model_type
+    # qwen3_5_text) is the real 9B-class option: opt in via --text-only-qwen35.
+    "qwen3.5:9b":  "Qwen/Qwen3-8B",   # deriver-proven text base (default)
     "qwen3:8b":    "Qwen/Qwen3-8B",   # deriver-proven text base (PLAN §3.4)
     "qwen3.5:4b":  "Qwen/Qwen3-8B",
     "qwen3.6:27b": "Qwen/Qwen3-8B",
-    # If you specifically need the 9B class, a community text-only build exists:
-    # "principled-intelligence/Qwen3.5-9B-text-only" / "techwithsergiu/Qwen3.5-text-9B"
     "unsloth/qwen3.5-9b-gguf": "Qwen/Qwen3-8B",
 }
 
@@ -39,7 +46,12 @@ def resolve_base(name: str) -> str:
     n = (name or "").strip()
     if n.endswith(".gguf") or n.startswith("/"):
         return n
-    return MODEL_ALIASES.get(n, n)
+    resolved = MODEL_ALIASES.get(n, n)
+    pref = preferred_base()
+    # Only redirect the aliases we control, never an explicit repo/path.
+    if pref and resolved == "Qwen/Qwen3-8B":
+        return pref
+    return resolved
 
 def load_model(base, max_seq_length=8192, bits=16):
     # load_in_4bit / dtype are the stable documented knobs; guard with a
@@ -327,9 +339,16 @@ def main():
                     help="max tokens per sample. 4096 for 12 GB cards; raise to 8192 on 48 GB")
     ap.add_argument("--load-bits", type=int, default=4, choices=[4, 16],
                     help="load base at 4-bit (fit 12 GB 3080 Ti) or 16-bit (needs ~24 GB)")
+    ap.add_argument("--text-only-qwen35", action="store_true",
+                    help="route the Qwen3-8B aliases to the community Qwen3.5 "
+                         "text-only 9B checkpoint (principled-intelligence/Qwen3.5-9B-text-only). "
+                         "For A/B-testing the 9B class against the proven 8B base.")
     ap.add_argument("--dpo-beta", type=float, default=0.1)
     ap.add_argument("--bits", type=int, default=4, choices=[4, 8], help="GGUF bits for export")
     a = ap.parse_args()
+    if a.text_only_qwen35:
+        _PREFERRED_BASE["repo"] = TEXT_ONLY_9B_REPO
+        print(f"[base] --text-only-qwen35: routing Qwen3-8B aliases -> {TEXT_ONLY_9B_REPO}")
     if a.stage == "sft":
         if not a.data: sys.exit("--data required for sft")
         run_sft(data=a.data, out=a.out, base=a.model, epochs=a.epochs,
