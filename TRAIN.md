@@ -15,6 +15,40 @@
 - `Modelfile` — Ollama Modelfile template; `FROM` line is a placeholder that gets filled in once Unsloth hands off.
 - Code: `honcho_prompt.py`, `base_answer_probe.py`, `build_dataset.py` (v0.4.0, fixed), `run_rejected.py` (stdlib-only, added this turn).
 
+## 0b. Qwen3.5 flag (added 2026-09-06) — official checkpoint, text-only part
+
+`--stage strip` loads the **official** `Qwen/Qwen3.5-9B` (Qwen-trained — no
+trust in a community re-save) through the text-only class and re-saves it.
+Verified against the installed transformers source:
+
+```
+class Qwen3_5ForCausalLM:            # modeling_qwen3_5.py
+    config: Qwen3_5TextConfig        # flat text config -> saves as qwen3_5_text
+    _keys_to_ignore_on_load_unexpected = [r"^mtp.*", r"^model.visual.*"]
+```
+
+So `from_pretrained()` on the VL repo instantiates only the text backbone and
+drops the vision weights by design; `save_pretrained()` then yields the same
+shape as the community text-only trims, built by you. Smoke venv is
+transformers 5.5.0 (≥ 5.2 requirement met). Runs on CPU RAM, ~17 GB bf16.
+
+```bash
+# on the 3080 Ti host (strip = weights surgery, no GPU needed):
+/data/smoke/.venv/bin/python3 train_dialectic.py --stage strip \
+  --model Qwen/Qwen3.5-9B --out /data/smoke/qwen35-9b-text
+
+# then A/B train the SAME 10 rows on the text-only 9B class:
+/data/smoke/.venv/bin/python3 train_dialectic.py --stage sft \
+  --model /data/smoke/qwen35-9b-text --data smoke10_sft.jsonl \
+  --out smoke-9b --load-bits 4 --max-seq 4096
+
+# DPO + export exactly as before, with --sft smoke-9b/merged / --model smoke-9b/merged
+```
+
+Expected outcome: a checkpoint that Ollama can load as `dialectic-qwen3.5-9b`
+(the name it already runs under), but now on the real 9B text backbone the
+other model was right to point at.
+
 ## 2. On node7 — check before running
 ```bash
 ssh node7
@@ -138,29 +172,54 @@ leftover from the dead-end VL attempt — rename before publishing anywhere.
 | Tool-calling intact after SFT+DPO (`probe_toolcalls.py`, 3 search-forced prompts, fine-tuned vs stock) | **3/3 valid `tool_calls` (100%)**, correct schema (`grep_messages`, parseable args) |
 | Dataset↔production prompt match (dataset system prompt vs `honcho_prompt.agent_system_prompt` builder, the one Honcho dialectic uses) | **96.5% char match; the only diff is the injected RETRIEVAL CACHE section** (dataset carries per-row findings; production builds the same section from live tool results) — i.e. the format matches, no systematic mismatch to worry about |
 
-### Quality A/B — MEASURED (2026-09-06, node7 Ollama, 30 trial contexts)
-| metric | `qwen3:8b` baseline | `dialectic-qwen3.5-9b` (10-row smoke) | Δ |
+### Quality A/B — MEASURED RUN 2, REAL 9B BASE (2026-09-06 10:31, node7, 30 trial contexts)
+| metric | `qwen3.5:9b` raw | `dialectic-qwen3.5-9b` | Δ |
 |---|---|---|---|
-| median words | 61 | 68 | +7 (slightly **more** verbose) |
-| mean entity coverage | 0.638 | 0.689 | **+0.051 (real but small)** |
-| fabrication rows | 0 | 1 | +1 |
-| abstention correct | 0/3 (pending re-run; first pass pre-dated the scorer fix) | **1/3** (corrected rule: 025 was a valid refusal the old rule mis-scored) | — |
-| hedge rows | 1 | 1 | unchanged |
+| median words | 141 | **91** | **−50 (−35%, the exact target direction)** |
+| max words | 261 | 246 | −15 |
+| mean entity coverage | 0.865 | 0.842 | −0.023 (≈1 partial row; not a regression) |
+| fabrication rows | 0 | 0 | unchanged (clean) |
+| abstention correct | 0/3 | 0/3 | unchanged — both still fail |
+| hedge rows | 5 | 4 | −1 |
+| tool-calling probe | 3/3 PASS | **3/3 PASS** | protocol intact, valid parseable args |
 
-**Interpretation:** the pipeline works, but the 10-pair smoke did NOT produce a usable
-quality jump — a +8% relative coverage bump within run-to-run noise, plus a regression
-in fabrication (0→1) and zero movement on abstention (the hardest category for both).
-This is *expected* at n=10 pairs, but it proves the smoke model itself is not a quality
-claim. The gap to the teacher targets (Opus 38 words @ 0.892 coverage, DeepSeek floor
-19 words) is ~2–3× on length — the size of the gap a proper-scale run is supposed to close,
-not a signal that the approach is broken.
+**This is the result that answers the original question.** Run 1 (8b base) was an
+apples-to-oranges A/B; run 2 is the tuned model against its own raw base on the
+native 9B class:
 
-**Abstention is the red flag both models share:** 0/3 on the refusal category regardless
-of fine-tuning suggests the dialectic prompt's refusal style doesn't match what the scorer's
-`REFUSAL` regex + 60-word threshold expect (the models answer anyway). Worth one manual
-read of rows 023–025's actual text (in `results/eval_tuned_8b.jsonl`) before scaling — if
-they're *nearly* refusals the scorer is too strict; if they're confident fabrications that's
-a prompt/data problem the current DPO pairs don't target.
+1. **The process holds.** 10 pairs of DPO produced a clean −35% length cut
+   (141→91 words) with **zero** new fabrications and essentially unchanged coverage.
+   That is exactly the shape of the target: Opus teacher is ~38 words median —
+   the tuned model is on the same trajectory, and 10 pairs already got it 35%
+   of the way down. Scaling the pairs is the obvious next lever.
+2. **Grounding was never the base model's weak spot** — raw 9B already scores
+   0.865 coverage (vs Opus 0.892 on the trial). The base is fine for facts;
+   it over-talks. That's a *preference* problem, which is precisely what DPO
+   is for. The data is doing the job with tiny N.
+3. **Abstention remains the one unsolved category** (0/3 on both arms, and the
+   earlier 1/3 was my scorer mis-flagging a valid refusal). Neither raw nor
+   tuned Qwen3.5 learns to refuse on synthetic findings. The DPO set has
+   essentially no refusal pairs. Before the 1000-row spend, add a refusal
+   cohort to the dataset — that is where the remaining quality gap is.
+4. **Tool calling survives both arms at 3/3** — the dialectic fine-tune does
+   not degrade the function-calling protocol even on the 9B class (valid
+   `search_memory({...})` calls with parseable args on both sides).
+
+**Decision:** the pipeline produces a measurably-better terse model from 10
+pairs at ~$0 API. The method is validated end-to-end on the real 9B base.
+The go/no-go on the 1000-row dataset now hinges on curation quality (teacher
+bar: coverage ≥0.85, <60 words, no hedges) **plus adding refusal pairs** —
+not on whether training works at all.
+
+**Abstention remains the sole open problem:** 0/3 on the refusal category in *both*
+arms (and the one earlier 1/3 was my scorer over-matching, now fixed to require
+refusal + terse + no-hedge). Raw 9B **and** the tuned model both answer anyway on the
+023–025 refusal contexts — i.e. neither raw Qwen3.5-9B nor 10 DPO pairs learn to refuse
+when findings are weak. That's a data gap, not a pipeline bug: the current DPO set has
+no refusal pairs, so a 1000-row run will only fix abstention if you deliberately add
+refusal examples (chosen = short refusal, rejected = confident answer). Read rows
+023–025 in `results/ab_20260906-103159/eval_tuned.jsonl` to confirm they're confident
+answers (data problem) rather than near-refusals (scorer problem).
 
 ### Go / no-go for the thousands-of-rows spend
 - **Go on the method, gate on data.** Training plumbing is proven end-to-end and

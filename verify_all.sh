@@ -14,11 +14,11 @@ echo "[1/3] tool-calling probe (tuned)"
 python3 probe_toolcalls.py --model dialectic-qwen3.5-9b --base "$BASE" 2>&1 | tee "$OUT/toolcalls_tuned.txt"
 echo "[2/3] quality A/B (30 contexts each) — this is the slow part"
 python3 eval_dialectic.py --contexts results/openrouter/contexts.jsonl \
-  --model qwen3:8b --base "$BASE/v1" --out "$OUT/eval_baseline.jsonl" 2>&1 | tee "$OUT/eval_baseline.log" | tail -12
+  --model qwen3.5:9b --base "$BASE/v1" --out "$OUT/eval_baseline.jsonl" 2>&1 | tee "$OUT/eval_baseline.log" | tail -12
 python3 eval_dialectic.py --contexts results/openrouter/contexts.jsonl \
   --model dialectic-qwen3.5-9b --base "$BASE/v1" --out "$OUT/eval_tuned.jsonl" 2>&1 | tee "$OUT/eval_tuned.log" | tail -12
 echo "[3/3] tool-calling probe (baseline control)"
-python3 probe_toolcalls.py --model qwen3:8b --base "$BASE" 2>&1 | tee "$OUT/toolcalls_baseline.txt"
+python3 probe_toolcalls.py --model qwen3.5:9b --base "$BASE" 2>&1 | tee "$OUT/toolcalls_baseline.txt"
 
 echo
 echo "=============================================="
