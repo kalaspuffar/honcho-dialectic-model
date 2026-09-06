@@ -124,6 +124,30 @@ Once a checkpoint passes Gate 1 AND the 30-context eval, the pipeline is:
 | 2026-09-05 | export (attempt 1) | `TypeError: 'dict' object is not callable` (then `'int' object is not callable`) at `fix_tokenizer_bos_token`, `tokenizer("A")` — all three "fallback" call-forms died on the same line for the same reason: `save_pretrained_gguf(save_directory, tokenizer, quantization_bit=None)` — passing `{"quantization_bit":bits}` or a bare `bits` as the 2nd positional puts a non-tokenizer into the tokenizer slot. Fix: pass the real tokenizer as 2nd positional, and pick the quant kwarg by introspecting the **bound instance method** (`inspect.signature(model.save_pretrained_gguf)` — Unsloth attaches it per-instance, so it is not in the class dict) — current unsloth: `quantization_method="q4_k_m"`, older builds: `quantization_bit` |
 | 2026-09-05 | dpo (attempt 1 → 2) | Twice: `ValueError: The batch received was empty` at `transformers/trainer.py _prepare_inputs`, both on the 3080 Ti (12 GB, py3.13) and the A6000 box — same crash both times. First hypothesis (v0.7.5) was Unsloth's `get_batch_samples` patch — partly right (that patch does track only stock keys for its item-count), but not the actual key-dropping site. | v0.7.6 (this commit), root cause found by reading `Trainer._get_dataloader` in the box's transformers 5.5.0: for non-`datasets.Dataset` datasets (our `TDDataset`) it goes through `_get_collator_with_removed_columns`, and with `remove_unused_columns=True` (TrainingArguments default) it wraps our collator in `RemoveColumnsCollator` which strips every key not in Qwen3 `forward()`'s signature — `c_input_ids`/`c_attn`/`c_labels`/`j_input_ids`/`j_attn`/`j_labels` are all dropped, empty dict hits the `len(inputs)==0` guard. SFT survived because its keys are literal signature columns. Fix is the one trl's DPOTrainer sets for exactly this reason: `TrainingArguments(remove_unused_columns=False)`. |
 
+## 7b. End-to-end status + pre-scale verification gates (2026-09-05)
+
+**Pipeline PROVEN end-to-end:** sft (10 rows) → dpo (10 pairs) → GGUF Q4_K_M export
+(`dialectic-qwen3.5-9b` on node7 Ollama, 8.2B Q4_K_M, 5.0 GB). The trained model is
+a **pipeline proof, not a quality claim** — 20 total examples is noise-level signal.
+Naming caveat: the base is Qwen3-**8B**; "qwen3.5-9b" in the model name is a
+leftover from the dead-end VL attempt — rename before publishing anywhere.
+
+### Verified (measured on node7 Ollama, 2026-09-05)
+| Gate | Result |
+|---|---|
+| Tool-calling intact after SFT+DPO (`probe_toolcalls.py`, 3 search-forced prompts, fine-tuned vs stock) | **3/3 valid `tool_calls` (100%)**, correct schema (`grep_messages`, parseable args) |
+| Dataset↔production prompt match (dataset system prompt vs `honcho_prompt.agent_system_prompt` builder, the one Honcho dialectic uses) | **96.5% char match; the only diff is the injected RETRIEVAL CACHE section** (dataset carries per-row findings; production builds the same section from live tool results) — i.e. the format matches, no systematic mismatch to worry about |
+
+### Pending / not-yet-measured
+- **Quality A/B** (the real go/no-go): `eval_dialectic.py` over `dataset_eval.sft.jsonl`,
+  `qwen3:8b` baseline vs `dialectic-qwen3.5-9b` — median_words, entity_coverage,
+  fabrication_rows, abstention_correct. 10-pair smoke can't move these reliably;
+  the full-train A/B is what decides "train on thousands" vs "not yet".
+- **Scale check**: the real dataset (thousands) — teacher consistency (Opus vs Gemini
+  chosen sides), DPO margin distribution, and how much of the gain is already captured
+  by Tier-0 config caps (`DIALECTIC_LEVELS__LOW__MAX_OUTPUT_TOKENS=500` etc.) before
+  paying for training at all — that part costs nothing and should be measured first.
+
 ## 8. Files to keep in sync
 - **Data** (`smoke10_sft.jsonl`, `smoke10_dpo.jsonl`, `dataset_*.jsonl`): lives here, git-ignored. Rebuild any time with:
   ```
