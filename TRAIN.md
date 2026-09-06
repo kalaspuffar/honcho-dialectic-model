@@ -138,15 +138,43 @@ leftover from the dead-end VL attempt — rename before publishing anywhere.
 | Tool-calling intact after SFT+DPO (`probe_toolcalls.py`, 3 search-forced prompts, fine-tuned vs stock) | **3/3 valid `tool_calls` (100%)**, correct schema (`grep_messages`, parseable args) |
 | Dataset↔production prompt match (dataset system prompt vs `honcho_prompt.agent_system_prompt` builder, the one Honcho dialectic uses) | **96.5% char match; the only diff is the injected RETRIEVAL CACHE section** (dataset carries per-row findings; production builds the same section from live tool results) — i.e. the format matches, no systematic mismatch to worry about |
 
-### Pending / not-yet-measured
-- **Quality A/B** (the real go/no-go): `eval_dialectic.py` over `dataset_eval.sft.jsonl`,
-  `qwen3:8b` baseline vs `dialectic-qwen3.5-9b` — median_words, entity_coverage,
-  fabrication_rows, abstention_correct. 10-pair smoke can't move these reliably;
-  the full-train A/B is what decides "train on thousands" vs "not yet".
-- **Scale check**: the real dataset (thousands) — teacher consistency (Opus vs Gemini
-  chosen sides), DPO margin distribution, and how much of the gain is already captured
-  by Tier-0 config caps (`DIALECTIC_LEVELS__LOW__MAX_OUTPUT_TOKENS=500` etc.) before
-  paying for training at all — that part costs nothing and should be measured first.
+### Quality A/B — MEASURED (2026-09-06, node7 Ollama, 30 trial contexts)
+| metric | `qwen3:8b` baseline | `dialectic-qwen3.5-9b` (10-row smoke) | Δ |
+|---|---|---|---|
+| median words | 61 | 68 | +7 (slightly **more** verbose) |
+| mean entity coverage | 0.638 | 0.689 | **+0.051 (real but small)** |
+| fabrication rows | 0 | 1 | +1 |
+| abstention correct | 0/3 | 0/3 | unchanged — **both fail abstention** |
+| hedge rows | 1 | 1 | unchanged |
+
+**Interpretation:** the pipeline works, but the 10-pair smoke did NOT produce a usable
+quality jump — a +8% relative coverage bump within run-to-run noise, plus a regression
+in fabrication (0→1) and zero movement on abstention (the hardest category for both).
+This is *expected* at n=10 pairs, but it proves the smoke model itself is not a quality
+claim. The gap to the teacher targets (Opus 38 words @ 0.892 coverage, DeepSeek floor
+19 words) is ~2–3× on length — the size of the gap a proper-scale run is supposed to close,
+not a signal that the approach is broken.
+
+**Abstention is the red flag both models share:** 0/3 on the refusal category regardless
+of fine-tuning suggests the dialectic prompt's refusal style doesn't match what the scorer's
+`REFUSAL` regex + 60-word threshold expect (the models answer anyway). Worth one manual
+read of rows 023–025's actual text (in `results/eval_tuned_8b.jsonl`) before scaling — if
+they're *nearly* refusals the scorer is too strict; if they're confident fabrications that's
+a prompt/data problem the current DPO pairs don't target.
+
+### Go / no-go for the thousands-of-rows spend
+- **Go on the method, gate on data.** Training plumbing is proven end-to-end and
+  reproducible; the missing variable is data volume + teacher quality + abstention-targeting.
+- **Free gate 1 — teacher audit at scale:** count how many candidate rows meet the bar
+  (coverage ≥ 0.85, < 60 words, no hedges, refusal rows for abstention contexts). If <50%
+  qualify, curation before training is the actual work.
+- **Free gate 2 — abstention rows:** the current smoke data has essentially no negative
+  examples; without them, a scaled run will still score 0/3. Add refusal pairs (chosen =
+  short refusal, rejected = confident answer) to the DPO set.
+- **Free gate 3 — Tier-0 caps:** `DIALECTIC_LEVELS__LOW__MAX_OUTPUT_TOKENS=*** etc. against the
+  same 30 contexts on stock qwen3:8b. If truncation alone gets baseline to ~45 words the
+  training target shifts from "length" to "grounding + abstention", which changes what data
+  to generate.
 
 ## 8. Files to keep in sync
 - **Data** (`smoke10_sft.jsonl`, `smoke10_dpo.jsonl`, `dataset_*.jsonl`): lives here, git-ignored. Rebuild any time with:

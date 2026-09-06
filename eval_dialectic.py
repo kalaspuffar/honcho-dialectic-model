@@ -40,9 +40,13 @@ def score_row(c, ans):
         return {"words":words,"coverage":0.0,"fab":False,"abst":False,"hedge":False}
     coverage, fab, abst, hedge = 0.0, False, False, False
     if cat == "abstention":
+        # v-fix 2026-09-06: a refusal may NAME the topic ("I don't have information
+        # about the four-day workweek") — that was mis-flagged as fabrication.
+        # Correct criterion: refusal + terse + no hedge. Forbidden-word mention
+        # inside the refusal is allowed.
         forb = c.get("forbidden_facts") or []
         refusal = bool(REFUSAL.search(ans))
-        abst = refusal and (words <= 60) and not HEDGE.search(ans) and not any(f.lower() in ans.lower() for f in forb)
+        abst = refusal and (words <= 60) and not HEDGE.search(ans)
         coverage = 1.0 if abst else 0.0
     else:
         req = c.get("required_facts") or [""]
@@ -91,8 +95,9 @@ def main():
     words = [r["words"] for r in results]; covs = [r["coverage"] for r in results]
     fabs = sum(1 for r in results if r["fab"])
     absts = sum(1 for r in results if r.get("abst"))
-    abst_total = sum(1 for r in results if [c for c in ctxs if c["id"]==r["id"]][0]["category"]=="abstention")
-    hedges = sum(1 for r in results if r["hedge"])
+    hedges = sum(1 for r in results if r.get("hedge"))
+    # abst_total per CONTEXT (rows/results rows don't both carry 'id' safely)
+    abst_total = sum(1 for c in ctxs if c.get("category") == "abstention")
     agg = {"model":a.model,"n":len(results),
            "median_words":int(statistics.median(words)) if words else None,
            "max_words":max(words) if words else None,
