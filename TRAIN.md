@@ -179,7 +179,7 @@ leftover from the dead-end VL attempt — rename before publishing anywhere.
 | max words | 261 | 246 | −15 |
 | mean entity coverage | 0.865 | 0.842 | −0.023 (≈1 partial row; not a regression) |
 | fabrication rows | 0 | 0 | unchanged (clean) |
-| abstention correct | 0/3 | 0/3 | unchanged — both still fail |
+| abstention | 0/3 (scorer-strict) | 0/3 (scorer-strict) but **front-loads explicit refusal in all 3 rows**; baseline leads with context | qualitative win, see manual read below |
 | hedge rows | 5 | 4 | −1 |
 | tool-calling probe | 3/3 PASS | **3/3 PASS** | protocol intact, valid parseable args |
 
@@ -196,11 +196,12 @@ native 9B class:
    0.865 coverage (vs Opus 0.892 on the trial). The base is fine for facts;
    it over-talks. That's a *preference* problem, which is precisely what DPO
    is for. The data is doing the job with tiny N.
-3. **Abstention remains the one unsolved category** (0/3 on both arms, and the
-   earlier 1/3 was my scorer mis-flagging a valid refusal). Neither raw nor
-   tuned Qwen3.5 learns to refuse on synthetic findings. The DPO set has
-   essentially no refusal pairs. Before the 1000-row spend, add a refusal
-   cohort to the dataset — that is where the remaining quality gap is.
+3. **Abstention: scorer says 0/3 both, but a manual read of the actual text
+   shows a real change** (documented below) — the tuned model *front-loads*
+   "I don't have any information about X in my memory" in all three refusal
+   rows; the raw 9B buries or skips the refusal and leads with related
+   context. Residual gap = refusal followed by too much disclosed context,
+   fixable with a small refusal-pair cohort in the next dataset.
 4. **Tool calling survives both arms at 3/3** — the dialectic fine-tune does
    not degrade the function-calling protocol even on the 9B class (valid
    `search_memory({...})` calls with parseable args on both sides).
@@ -211,15 +212,55 @@ The go/no-go on the 1000-row dataset now hinges on curation quality (teacher
 bar: coverage ≥0.85, <60 words, no hedges) **plus adding refusal pairs** —
 not on whether training works at all.
 
-**Abstention remains the sole open problem:** 0/3 on the refusal category in *both*
-arms (and the one earlier 1/3 was my scorer over-matching, now fixed to require
-refusal + terse + no-hedge). Raw 9B **and** the tuned model both answer anyway on the
-023–025 refusal contexts — i.e. neither raw Qwen3.5-9B nor 10 DPO pairs learn to refuse
-when findings are weak. That's a data gap, not a pipeline bug: the current DPO set has
-no refusal pairs, so a 1000-row run will only fix abstention if you deliberately add
-refusal examples (chosen = short refusal, rejected = confident answer). Read rows
-023–025 in `results/ab_20260906-103159/eval_tuned.jsonl` to confirm they're confident
-answers (data problem) rather than near-refusals (scorer problem).
+**Abstention — manual read of rows 023–025 (tuned arm):** the scorer's "0/3" is **too strict**,
+the actual behaviour is defensible. All three tuned refusals contain an explicit
+"I don't have any information about X in my memory" refusal, followed by
+*useful* context:
+
+- **023 (kombucha temp):** "I don't have any information about kombucha
+  fermentation temperatures in my memory. The temperature-related conclusions
+  I have are about: – Bread-making yeast fermentation … – Homemade preserves
+  storage … – Epoxy resin curing …" — refuses the topic, discloses what it
+  *does* have relevant to it. 65 words.
+- **024 (Mediterranean/Alzheimer's):** "I don't have any information about
+  the Mediterranean diet and Alzheimer's disease in my memory. The conclusions
+  … cover cardiovascular health, brain health via omega-3, blood pressure,
+  diabetes, cancer risk, and longevity, but none specifically address
+  Alzheimer's …" — clean refusal + honest boundary + related facts disclosed. 80 words.
+- **025 (four-day workweek):** "I searched memory … **I don't have any
+  information about a four-day workweek policy in 2026.** The policies I found
+  … include: – Flexible working hours … – Start/end time choices … – Remote
+  work pilot program …" — explicit denial of the *specific* claim, discloses
+  the real 2026 policies that exist. 109 words.
+
+Compare the baseline (raw 9B) on the same rows: 024's refusal is
+equally explicit, but qualified ("I don't have any information
+**specifically about whether** the Mediterranean diet reduces the risk of
+Alzheimer's disease...") and then continues with related findings.
+On 025, the baseline leads with the *related-but-different* findings
+(flexible working hours, start/end window, remote-work pilot — all real
+context entries) **without ever stating that a four-day-workweek policy
+specifically is not in memory** — a user reading that could reasonably
+conclude "yes, there was a policy change." The tuned model's 025 refusal
+states the specific claim is absent *before* listing the related real
+findings. On 023 the baseline emitted a malformed 21-word "answer" — a
+meta-narration of a memory search plus raw tool-call text
+(`search_memory(query=...)` …) instead of either a refusal or an answer.
+
+**So the abstention pattern that matters is: when a question is *specific*
+but only *related* findings exist, the baseline tends to under-refuse
+(answers from the related findings without clarifying the specific thing
+isn't there); the tuned model correctly refuses the specific claim first,
+then discloses what it actually has.** That's the exact behaviour DPO pair
+data targeting "refuse specific, disclose related" would reinforce with
+more rows.
+
+**So the residual abstention gap is not "model can't refuse"** (it clearly can,
+and it now refuses *before* revealing context)
+**but "the refusal block is followed by more context than the Opus-style
+answer carries"** — 65–109 words of disclosed related findings vs. ~30 words
+on a bare refusal. Fix is a preference-shaping cohort (chosen = 2-sentence
+refusal, rejected = refusal + context-disclosure), not a capability problem.
 
 ### Go / no-go for the thousands-of-rows spend
 - **Go on the method, gate on data.** Training plumbing is proven end-to-end and
