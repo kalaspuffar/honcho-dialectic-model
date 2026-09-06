@@ -21,21 +21,16 @@ import argparse, json, os, sys
 
 from unsloth import FastLanguageModel  # noqa: E402
 
-TEXT_ONLY_9B_REPO = "principled-intelligence/Qwen3.5-9B-text-only"
-# Set by --text-only-qwen35: routes the Qwen3-8B aliases to the community
-# Qwen3.5 text-only checkpoint. NOT a default — the 8B base is what the
-# pipeline is proven on; flip it only when testing the 9B class.
-_PREFERRED_BASE: dict = {"repo": None}
-
-def preferred_base():
-    return _PREFERRED_BASE.get("repo")
+# Official Qwen3.5 VL checkpoints are trained by Qwen (the source you want);
+# the vision encoder is never called for text rows but its weights still load.
+# The sanctioned way to drop them (HF model_doc qwen3_5 + community trims):
+# instantiate the TEXT-ONLY class Qwen3_5ForCausalLM from the official
+# checkpoint, re-save -> a checkpoint with no vision weights at all.
+# `--stage strip` does exactly that against the official repo.
+STRIP_DEFAULT_REPO = "Qwen/Qwen3.5-9B"
 
 MODEL_ALIASES = {
-    # Qwen/Qwen3.5-9B is image-text-to-text (VL) — Unsloth loads a
-    # Qwen3VLProcessor on it and chokes on text-only rows (attempt-3).
-    # The community text-only 9B build (Qwen3_5ForCausalLM, model_type
-    # qwen3_5_text) is the real 9B-class option: opt in via --text-only-qwen35.
-    "qwen3.5:9b":  "Qwen/Qwen3-8B",   # deriver-proven text base (default)
+    # Ollama-style names map to the deriver-proven text base by default.
     "qwen3:8b":    "Qwen/Qwen3-8B",   # deriver-proven text base (PLAN §3.4)
     "qwen3.5:4b":  "Qwen/Qwen3-8B",
     "qwen3.6:27b": "Qwen/Qwen3-8B",
@@ -45,13 +40,8 @@ MODEL_ALIASES = {
 def resolve_base(name: str) -> str:
     n = (name or "").strip()
     if n.endswith(".gguf") or n.startswith("/"):
-        return n
-    resolved = MODEL_ALIASES.get(n, n)
-    pref = preferred_base()
-    # Only redirect the aliases we control, never an explicit repo/path.
-    if pref and resolved == "Qwen/Qwen3-8B":
-        return pref
-    return resolved
+        return n                       # local path (e.g. a stripped ckpt) passes through
+    return MODEL_ALIASES.get(n, n)
 
 def load_model(base, max_seq_length=8192, bits=16):
     # load_in_4bit / dtype are the stable documented knobs; guard with a
@@ -300,6 +290,49 @@ def run_dpo(data, out, base, beta=0.1, epochs=1, max_seq_length=4096, bits=4, ma
     return merged_dir
 
 # ---------- GGUF export ----------
+# ---------- strip vision (Qwen3.5 VL -> text-only) ----------
+def run_strip(repo, out):
+    """Strip the vision encoder from an official Qwen3.5 VL checkpoint.
+
+    Loads the OFFICIAL weights (Qwen-trained, not a community re-save) through
+    the TEXT-ONLY class, then re-saves. Verified against the transformers
+    source (models/qwen3_5/modeling_qwen3_5.py):
+
+      class Qwen3_5ForCausalLM(Qwen3_5PreTrainedModel, GenerationMixin):
+          config: Qwen3_5TextConfig
+          _keys_to_ignore_on_load_unexpected = [r"^mtp.*", r"^model.visual.*"]
+
+    i.e. from_pretrained() on the official VL repo instantiates ONLY the text
+    backbone, and its load path explicitly throws the `model.visual.*` and
+    `mtp.*` tensors away. model.config is then a flat Qwen3_5TextConfig, so
+    save_pretrained persists architectures=["Qwen3_5ForCausalLM"],
+    model_type=qwen3_5_text, NO vision weights — the exact same shape as the
+    community text-only trims, but built from the official checkpoint by you.
+
+    Needs transformers >= 5.2 (qwen3_5 module). Runs in CPU RAM (~17 GB for
+    the 9B text weights in bf16), not GPU."""
+    import torch
+    try:
+        from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
+    except ImportError as e:
+        sys.exit("Qwen3_5ForCausalLM missing — need transformers >= 5.2.\n  " + str(e))
+    print(f"[strip] {repo} -> {out}: instantiating Qwen3_5ForCausalLM "
+          f"(ignores model.visual.* + mtp.* by design)")
+    model = Qwen3_5ForCausalLM.from_pretrained(repo, torch_dtype=torch.bfloat16)
+    n_text = sum(p.numel() for p in model.parameters())
+    print(f"[strip] live text parameters: {n_text/1e9:.2f}e9 "
+          f"({n_text*2/1e9:.1f} GB bf16 in RAM) — no visual.* modules loaded")
+    os.makedirs(out, exist_ok=True)
+    model.save_pretrained(out, safe_serialization=True)
+    from transformers import AutoTokenizer
+    AutoTokenizer.from_pretrained(repo).save_pretrained(out)
+    du = sum(os.path.getsize(os.path.join(out, f)) for f in os.listdir(out) if f.endswith(".safetensors"))
+    print(f"[strip] DONE  {out}")
+    print(f"[strip]   weights on disk: {du/1e9:.2f} GB | config arch: Qwen3_5ForCausalLM")
+    print(f"[strip] next: python3 train_dialectic.py --stage sft --model {out} "
+          f"--data smoke10_sft.jsonl --out smoke-9b [--load-bits 4]")
+    return out
+
 def run_export(hf_dir, out, bits=4):
     base = resolve_base(hf_dir)
     print(f"[export] hf = {base}  quant = Q{bits}_K_M")
@@ -327,7 +360,8 @@ def run_export(hf_dir, out, bits=4):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stage", required=True, choices=["sft", "dpo", "export"])
+    ap.add_argument("--stage", required=True,
+                    choices=["sft", "dpo", "export", "strip"])
     ap.add_argument("--data", help="jsonl (sft or dpo rows)")
     ap.add_argument("--sft",  help="path to merged HF dir (dpo stage: smoke/merged)")
     ap.add_argument("--model", default="Qwen/Qwen3-8B",
@@ -339,16 +373,13 @@ def main():
                     help="max tokens per sample. 4096 for 12 GB cards; raise to 8192 on 48 GB")
     ap.add_argument("--load-bits", type=int, default=4, choices=[4, 16],
                     help="load base at 4-bit (fit 12 GB 3080 Ti) or 16-bit (needs ~24 GB)")
-    ap.add_argument("--text-only-qwen35", action="store_true",
-                    help="route the Qwen3-8B aliases to the community Qwen3.5 "
-                         "text-only 9B checkpoint (principled-intelligence/Qwen3.5-9B-text-only). "
-                         "For A/B-testing the 9B class against the proven 8B base.")
     ap.add_argument("--dpo-beta", type=float, default=0.1)
     ap.add_argument("--bits", type=int, default=4, choices=[4, 8], help="GGUF bits for export")
     a = ap.parse_args()
-    if a.text_only_qwen35:
-        _PREFERRED_BASE["repo"] = TEXT_ONLY_9B_REPO
-        print(f"[base] --text-only-qwen35: routing Qwen3-8B aliases -> {TEXT_ONLY_9B_REPO}")
+    if a.stage == "strip":
+        # --model = official repo to strip (default Qwen3.5-9B), --out = destination
+        repo = a.model if a.model != "Qwen/Qwen3-8B" else STRIP_DEFAULT_REPO
+        run_strip(repo=repo, out=a.out)
     if a.stage == "sft":
         if not a.data: sys.exit("--data required for sft")
         run_sft(data=a.data, out=a.out, base=a.model, epochs=a.epochs,
