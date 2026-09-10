@@ -13,7 +13,7 @@ Plan, decisions and status live in [PLAN.md](PLAN.md); the training runbook and 
 | file | role |
 |---|---|
 | `gen_contexts.py` | **stage 1** — scenarios (peer, conclusions, searches, question, rubric) from any OpenRouter/Anthropic model |
-| `gen_rejected.py` | **stage 2** — the base model (Ollama) answers each scenario on the real Honcho trajectory → *rejected* |
+| `gen_rejected.py` | **stage 2** — the base model (Ollama, or the same weights on OpenRouter) answers each scenario on the real Honcho trajectory → *rejected* |
 | `gen_chosen.py` | **stage 3** — the teacher writes the ideal terse answer → *chosen* (any OpenRouter/Anthropic model) |
 | `build_dataset.py` | **stage 4** — join, filter, persona split, emit SFT + DPO JSONL |
 | `train_dialectic.py` | **stage 5** — `check` / `strip` / `sft` / `dpo` / `export` (GPU host, Unsloth venv) |
@@ -74,6 +74,11 @@ python3 gen_contexts.py run --n 3000 --model deepseek --out data/contexts.jsonl 
 # 2. the base model's own answers = rejected (Ollama host; slow — one request at a time by default)
 python3 gen_rejected.py --contexts data/contexts.jsonl --out data/rejected.jsonl \
     --base http://node7.ea.org:11434/v1 --model qwen3.5:9b
+#    Ollama host busy? Same weights on OpenRouter (qwen/qwen3.5-9b, ~$0.10/$0.15 per M tokens, ≈ $0.5 per
+#    1 000 rows). Any OpenRouter alias or vendor/model id switches provider; the estimate is printed,
+#    --max-usd is an opt-in live cap, resume works across providers because the output file is the same.
+python3 gen_rejected.py --contexts data/contexts.jsonl --out data/rejected.jsonl \
+    --model qwen9b --concurrency 8 --max-usd 3
 
 # 3. teacher answers = chosen (Opus, batch = 50% price)
 python3 gen_chosen.py submit --contexts data/contexts.jsonl --model opus --out data/chosen.jsonl

@@ -86,6 +86,10 @@ for name, t, want in [("plain", '{"a": 1}', True), ("prose", 'x:\n{"q":1,"f":[]}
 ok("resolve_model alias", be.resolve_model("opus").id == "claude-opus-5")
 ok("resolve_model qualified", be.resolve_model("openrouter:x/y").provider == "openrouter")
 ok("resolve_model bare claude", be.resolve_model("claude-sonnet-5").provider == "anthropic")
+ok("student_endpoint ollama tag", be.student_endpoint("qwen3.5:9b", "http://h:1/v1")[:3] == ("ollama", "http://h:1/v1", "qwen3.5:9b"))
+os.environ["OPENROUTER_API_KEY"] = os.environ.get("OPENROUTER_API_KEY") or "mock"
+ok("student_endpoint openrouter alias", be.student_endpoint("qwen9b")[0] == "openrouter" and be.student_endpoint("qwen9b")[2] == "qwen/qwen3.5-9b")
+ok("student_endpoint openrouter id", be.student_endpoint("openrouter:qwen/qwen3.5-9b")[1] == be.OPENROUTER_BASE)
 u, _, _ = be.estimate_usd(be.resolve_model("opus"), [{"system": "a" * 4000, "user": "b" * 4000}], 100)
 ub, _, _ = be.estimate_usd(be.resolve_model("opus"), [{"system": "a" * 4000, "user": "b" * 4000}], 100, batch=True)
 ok("batch estimate is half of sync", abs(ub * 2 - u) < 1e-9)
@@ -212,6 +216,15 @@ if "--quick" not in sys.argv:
         rej = be.read_jsonl(rejf)
         ok("gen_rejected: 8 verbose answers", r.returncode == 0 and len(rej) == 8 and all(x["words"] > 50 for x in rej), r.stdout[-300:])
         ok("gen_rejected: extra tool-call round handled", any(x.get("extra_calls") for x in rej))
+        # rejected via OpenRouter (same mock behind OPENROUTER_BASE, bearer key, estimate + spend printed)
+        rejf2 = f"{tmp}/rejected_or.jsonl"
+        r = sh([sys.executable, "gen_rejected.py", "--contexts", ctxf, "--out", rejf2, "--model", "openrouter:mock/qwen", "--concurrency", "4"], env_or)
+        rej2 = be.read_jsonl(rejf2)
+        ok("gen_rejected (openrouter mock): 8 answers, estimate + spend printed",
+           r.returncode == 0 and len(rej2) == 8 and not any(be.failed(x) for x in rej2)
+           and "estimate:" in r.stdout and "usage-based spend" in r.stdout, r.stdout[-400:])
+        r = sh([sys.executable, "gen_rejected.py", "--contexts", ctxf, "--out", f"{tmp}/rejected_cap.jsonl", "--model", "qwen9b", "--max-usd", "0"], env_or)
+        ok("gen_rejected (openrouter mock): --max-usd cap stops early", r.returncode == 0 and "cost cap" in r.stdout, r.stdout[-300:])
         # dataset
         r = sh([sys.executable, "build_dataset.py", "--contexts", ctxf, "--rejected", rejf, "--chosen", chof, "--out", f"{tmp}/ds"])
         tr, ev = be.read_jsonl(f"{tmp}/ds_train.dpo.jsonl"), be.read_jsonl(f"{tmp}/ds_eval.dpo.jsonl")

@@ -52,7 +52,11 @@ MODELS = {
     "gpt5":       ("openrouter", "openai/gpt-5",                    1.25, 10.00),
     "grok46":     ("openrouter", "x-ai/grok-4.6",                   2.00,  6.00),
     "llama70":    ("openrouter", "meta-llama/llama-3.3-70b-instruct", 0.10, 0.32),
+    # student on OpenRouter (stage 2 / eval when the Ollama host is busy)
+    "qwen9b":     ("openrouter", "qwen/qwen3.5-9b",                 0.10,  0.15),
 }
+OLLAMA_DEFAULT_BASE = "http://node7.ea.org:11434/v1"
+OLLAMA_DEFAULT_MODEL = "qwen3.5:9b"
 
 
 class ModelSpec:
@@ -103,6 +107,24 @@ def load_key(name: str):
 def setting(name: str, default: str) -> str:
     """Non-secret setting (e.g. OLLAMA_BASE) from the environment or keys.env."""
     return load_key(name) or default
+
+
+def student_endpoint(model: str, base=None):
+    """Where the *student* (stage 2 rejected / eval) runs. Returns
+    (provider, base_url, model_id, api_key, ModelSpec-or-None).
+
+    Ollama (free, default): a bare Ollama tag such as 'qwen3.5:9b'.
+    OpenRouter: an alias with provider openrouter ('qwen9b'), 'openrouter:<vendor/model>'
+    or a bare '<vendor/model>'. Base comes from OPENROUTER_BASE (mockable); the key from
+    OPENROUTER_API_KEY. An explicit `base` always wins."""
+    m = (model or "").strip()
+    is_or = (m in MODELS and MODELS[m][0] == "openrouter") or m.startswith("openrouter:") or "/" in m
+    if is_or:
+        spec = resolve_model(m)
+        if spec.provider != "openrouter":
+            raise SystemExit(f"student model must be an Ollama tag or an OpenRouter id, got {spec}")
+        return "openrouter", (base or OPENROUTER_BASE), spec.id, key_for(spec), spec
+    return "ollama", (base or setting("OLLAMA_BASE", OLLAMA_DEFAULT_BASE)), m, None, None
 
 
 def key_for(spec: ModelSpec):

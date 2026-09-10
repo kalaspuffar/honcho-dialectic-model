@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""eval_model.py — run an Ollama model over held-out contexts on the Honcho
-trajectory and score it with scoring.py (same rules as build_dataset.py).
+"""eval_model.py — run a student model (Ollama, or OpenRouter for the untuned base)
+over held-out contexts on the Honcho trajectory and score it with scoring.py
+(same rules as build_dataset.py).
 
   python3 eval_model.py --contexts data/contexts.jsonl --ids-from data/dataset_eval.dpo.jsonl \
       --model qwen3.5:9b --base http://node7.ea.org:11434/v1 --out results/eval_base.jsonl
   python3 eval_model.py --contexts data/contexts.jsonl --ids-from data/dataset_eval.dpo.jsonl \
       --model dialectic-v1 --out results/eval_v1.jsonl
+  python3 eval_model.py --contexts ... --ids-from ... --model qwen9b --out results/eval_base_or.jsonl   # OpenRouter
   python3 eval_model.py compare results/eval_base.jsonl results/eval_v1.jsonl
 
 --ids-from restricts to the ids in a dataset file (use the *eval* split — the
@@ -31,12 +33,13 @@ def run(a):
         ctxs = ctxs[:a.limit]
     if not ctxs:
         sys.exit("no contexts selected")
-    print(f"{a.model} @ {a.base}: {len(ctxs)} contexts", file=sys.stderr)
+    provider, base, model_id, api_key, _spec = be.student_endpoint(a.model, a.base)
+    print(f"{provider} {model_id} @ {base}: {len(ctxs)} contexts", file=sys.stderr)
 
     def one(c):
         try:
-            r = answer_with_ollama(a.base, a.model, c, max_rounds=a.max_rounds, temperature=a.temperature,
-                                   max_tokens=a.max_tokens)
+            r = answer_with_ollama(base, model_id, c, max_rounds=a.max_rounds, temperature=a.temperature,
+                                   max_tokens=a.max_tokens, api_key=api_key)
         except Exception as e:  # noqa: BLE001
             r = {"answer": "", "extra_calls": 0, "forced": False, "error": f"{type(e).__name__}: {e}"}
         s = scoring.score_answer(c, r["answer"])
@@ -83,7 +86,7 @@ def main():
     p.add_argument("--contexts", required=True)
     p.add_argument("--ids-from", default=None, help="dataset jsonl whose ids select the eval contexts")
     p.add_argument("--model", required=True)
-    p.add_argument("--base", default=be.setting("OLLAMA_BASE", "http://node7.ea.org:11434/v1"))
+    p.add_argument("--base", default=None, help="default: OLLAMA_BASE, or OPENROUTER_BASE for OpenRouter models")
     p.add_argument("--out", required=True)
     p.add_argument("--limit", type=int, default=0)
     p.add_argument("--concurrency", type=int, default=1)

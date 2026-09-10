@@ -160,36 +160,61 @@ def stringify_tool_args(msgs):
     return out
 
 
-# ------------------------------------------------------------- Ollama answering
-def _chat(base, body, timeout=900):
+# ------------------------------------------------ student answering (OpenAI-compatible)
+OPENROUTER_HEADERS = {"HTTP-Referer": "https://github.com/kalaspuffar/honcho-dialectic-model",
+                      "X-Title": "honcho-dialectic-model"}
+
+
+def _chat(base, body, timeout=900, api_key=None):
+    """POST /chat/completions on any OpenAI-compatible endpoint (Ollama, OpenRouter).
+    Returns (message, usage). `api_key` adds the bearer header OpenRouter needs."""
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
+        headers.update(OPENROUTER_HEADERS)
     req = urllib.request.Request(base.rstrip("/") + "/chat/completions",
-                                 data=json.dumps(body).encode(),
-                                 headers={"Content-Type": "application/json"})
+                                 data=json.dumps(body).encode(), headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read())["choices"][0]["message"]
+        data = json.loads(r.read())
+    if not data.get("choices"):          # OpenRouter reports provider errors in-body with HTTP 200
+        raise RuntimeError(f"no choices: {str(data.get('error') or data)[:300]}")
+    return data["choices"][0]["message"], data.get("usage") or {}
 
 
-def answer_with_ollama(base, model, ctx, max_rounds=3, temperature=0.3, max_tokens=1500):
+def _add_usage(total, usage):
+    for k in ("prompt_tokens", "completion_tokens"):
+        total[k] = total.get(k, 0) + int(usage.get(k) or 0)
+
+
+def answer_with_ollama(base, model, ctx, max_rounds=3, temperature=0.3, max_tokens=1500, api_key=None):
     """Run the student model on the trajectory, the way Honcho's loop would.
 
+    Works against any OpenAI-compatible /chat/completions endpoint: Ollama's /v1
+    (no key) or OpenRouter (pass `api_key`) — see `llm_backend.student_endpoint`.
     If the model asks for more tool calls we answer each with NO_RESULTS (the
     scenario's retrieval is already complete) for up to `max_rounds`, then force
     a synthesis turn by dropping the tool schemas. Returns
-    {"answer", "extra_calls", "forced"}."""
+    {"answer", "extra_calls", "forced", "usage": {"prompt_tokens", "completion_tokens"}}."""
     msgs = build_messages(ctx, arguments_as_string=True)
-    extra, forced = 0, False
+    extra, forced, usage = 0, False, {}
     for _ in range(max_rounds):
-        m = _chat(base, {"model": model, "temperature": temperature, "max_tokens": max_tokens,
-                         "messages": msgs, "tools": TOOL_SCHEMAS})
+        m, u = _chat(base, {"model": model, "temperature": temperature, "max_tokens": max_tokens,
+                            "messages": msgs, "tools": TOOL_SCHEMAS}, api_key=api_key)
+        _add_usage(usage, u)
         calls = m.get("tool_calls") or []
         if not calls:
-            return {"answer": (m.get("content") or "").strip(), "extra_calls": extra, "forced": forced}
+            return {"answer": (m.get("content") or "").strip(), "extra_calls": extra, "forced": forced,
+                    "usage": usage}
         msgs.append({"role": "assistant", "content": m.get("content") or "", "tool_calls": calls})
         for tc in calls:
             extra += 1
             msgs.append({"role": "tool", "tool_call_id": tc.get("id", f"call_extra_{extra}"),
                          "name": (tc.get("function") or {}).get("name", ""), "content": NO_RESULTS})
     forced = True
-    m = _chat(base, {"model": model, "temperature": temperature, "max_tokens": max_tokens,
-                     "messages": msgs})
-    return {"answer": (m.get("content") or "").strip(), "extra_calls": extra, "forced": forced}
+    m, u = _chat(base, {"model": model, "temperature": temperature, "max_tokens": max_tokens,
+                        "messages": msgs}, api_key=api_key)
+    _add_usage(usage, u)
+    return {"answer": (m.get("content") or "").strip(), "extra_calls": extra, "forced": forced, "usage": usage}
+
+
+answer_on_trajectory = answer_with_ollama   # provider-neutral name

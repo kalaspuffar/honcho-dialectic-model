@@ -238,6 +238,13 @@ back to this host → I fold `summary.json` + your blind-review picks into §3.2
   trial arms to compare gen quality next) and lock per-step model assignments before full volume.
   Committed + tagged `v0.2.0`.
 
+- **2026-09-10** Stage 2 (rejected) can run the student on **OpenRouter** (`qwen/qwen3.5-9b`,
+  alias `qwen9b`, $0.10/$0.15 per M) when the Ollama host is busy. Same weights, same trajectory,
+  same output file, so runs resume across providers. Estimate printed, `--max-usd` opt-in cap, spend
+  tracked from usage. `eval_model.py` accepts the same model spec. Caveat: a different serving stack
+  (quantisation, sampler, reasoning budget) is a mild distribution shift vs the Ollama deployment;
+  keep one provider per dataset where possible and note the provider in the run log.
+
 ## 11. Trained model inventory (Daniel, 2026-09-09)
 
 | Ollama name | records trained | note |

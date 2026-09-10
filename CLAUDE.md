@@ -27,8 +27,8 @@ python3 verify_pipeline.py --quick    # skip the mock end-to-end part
 
 # stage 1  scenarios          (run = concurrent sync, both providers; submit/status/fetch = Anthropic batches)
 python3 gen_contexts.py estimate|run|submit|status|fetch --n N --model <alias|anthropic:id|openrouter:id> --out data/contexts.jsonl
-# stage 2  base model answers (Ollama) -> rejected
-python3 gen_rejected.py --contexts data/contexts.jsonl --out data/rejected.jsonl [--base URL --model NAME --only id1,id2]
+# stage 2  base model answers (Ollama, or OpenRouter when --model is an alias/vendor id) -> rejected
+python3 gen_rejected.py --contexts data/contexts.jsonl --out data/rejected.jsonl [--base URL --model NAME|qwen9b --only id1,id2 --max-usd N]
 # stage 3  teacher answers -> chosen
 python3 gen_chosen.py estimate|run|submit|status|fetch --contexts data/contexts.jsonl --model opus --out data/chosen.jsonl
 # stage 4  join + filters + persona split -> data/dataset_{train,eval}.{sft,dpo}.jsonl
@@ -83,6 +83,9 @@ Invariants that span files:
 - **One backend.** `llm_backend.py` owns the model/price table (`MODELS`), key loading, OpenRouter
   concurrency with retries, Anthropic sync + Message Batches, manifests, and resume-safe JSONL
   merging. Both generation scripts share its CLI shape (`estimate/run/submit/status/fetch`).
+  `student_endpoint(model, base)` decides where the *student* runs (Ollama tag vs OpenRouter
+  alias/id) for `gen_rejected.py` and `eval_model.py`; `trajectory.answer_with_ollama` is the one
+  student caller and accepts any OpenAI-compatible endpoint plus an optional bearer key.
 - **Rejected comes from the base model, not a teacher** (PLAN §3.1). Never replace stage 2 with
   teacher-written "verbose" answers.
 - **Cost policy.** Estimates are always printed. `run --max-usd` is an opt-in live cap on the
