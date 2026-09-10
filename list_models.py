@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""fetch_openrouter_models.py -- public /models endpoint (no key, no cost).
+"""list_models.py -- public /models endpoint (no key, no cost).
 Lists 'writer' candidate models on OpenRouter with real IDs + USD/M pricing.
 Run this before choosing trial arms so you know what you're paying per run.
 """

@@ -267,3 +267,31 @@ Validation (2026-09-09): the three are behaviorally indistinguishable — head-t
 6. **(Daniel, optional — the one I most want)** File the brevity-knob feature request with the Honcho
    team; even a plain `ANSWER_MAX_WORDS` would make the fine-tune a safety net rather than our only lever.
    Text draft lives in the vault's `active-projects/Honcho-Dialectic-Verbosity-Report.md` (old Tier-1).
+
+- **2026-09-10 — why dialectic_1/2/3 were identical (Claude review, Daniel's question).** Not the
+  premise. `train_dialectic.py` (since v0.5.1) split SFT as `samples[:7]` train / rest eval whenever
+  a file had >8 rows — every run SFT-trained on 7 rows. DPO then ran at lr 5e-7 (a full-fine-tune
+  value; LoRA needs ~1e-5), with per-token length-normalised log-probs (removes the length signal)
+  and an off-by-one in the log-prob gather. Net: the three models = base + 7-row SFT. The 500 ≈
+  1000 ≈ 2000 result carries no information about data volume. **Decisions (Daniel):**
+  (a) fix training (v0.8.0), (b) move all rows to the **tool-trajectory format** — findings arrive as
+  tool results after synthetic `search_*` calls, exactly as in Honcho's loop, never in the system
+  prompt (closes R2), (c) contexts become peer-style conclusions about a named persona instead of
+  encyclopedia facts, (d) reorganise: `gen_contexts.py` / `gen_chosen.py` (any OpenRouter or
+  Anthropic model, `run` concurrent or Anthropic `submit/fetch` batches), `gen_rejected.py`,
+  `build_dataset.py`, `train_dialectic.py`, `eval_model.py`; shared `llm_backend.py`,
+  `trajectory.py`, `scoring.py`; `openrouter_trial.py`, `write_chosen_batch.py`, `run_rejected.py`,
+  `eval_dialectic.py`, `rescore_abstention.py`, `estimate_cost.py`, `teacher_trial.py`,
+  `write_chosen.py`, `base_answer_probe.py`, `run_trial.sh` removed. Also fixed: the build_dataset
+  fabrication gate was unreachable; the persona split ignored its seed. §4/§5 above describe the
+  old pipeline; README.md is now the usage reference.
+
+## 13. Next actions after the 2026-09-10 rewrite
+
+1. Regenerate data in the trajectory format (old `results/openrouter/contexts.jsonl` rows are the
+   old schema and are not reused): `gen_contexts.py run --n 3000 --model deepseek`, then
+   `gen_rejected.py`, then `gen_chosen.py submit/fetch --model opus`, then `build_dataset.py`.
+2. `train_dialectic.py --stage check` on the emitted SFT file to pick `--max-seq`.
+3. Train ONE model (500 rows is enough for the first signal) with v0.8.0 defaults, run
+   `verify_all.sh` against the base on the eval split. Only if that shows a clear gap, sweep sizes.
+4. Then the real gate: Phase D through Honcho's loop (§6).

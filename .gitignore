@@ -8,3 +8,5 @@ conversations.jsonl
 context_pool.jsonl
 *.gguf
 __pycache__/
+
+data/

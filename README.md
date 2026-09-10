@@ -1,38 +1,151 @@
 # honcho-dialectic-model
 
-A concise dialectic (recall) model for Honcho, fine-tuned to be terse by default.
-Mirrors the conventions of `kalaspuffar/honcho-deriver-model` (JSONL pipeline, `--count/--out`, Modelfile at root, sanity-check gates).
+Fine-tune a small Qwen model so Honcho's dialectic (memory-recall) answers are **terse by
+default**: grounded, exact values, no preamble, no search narration. Synthetic data from a
+teacher model, the base model's own verbose answers as the DPO "rejected" side, Unsloth QLoRA
+SFT → DPO → GGUF → Ollama.
 
-**Plan, findings, decisions, and status:** see [PLAN.md](PLAN.md) — that is the single source of truth for this project.
+Plan, decisions and status live in [PLAN.md](PLAN.md); the training runbook and failure log in
+[TRAIN.md](TRAIN.md). Read those before changing pipeline behaviour.
 
-## Pipeline
+## Layout
 
-| stage | script | does |
-|---|---|---|
-| 1 | `openrouter_trial.py gen` (Phase B) — or its `teacher_trial.py` equivalent | generates shared (persona, question, findings, rubric) contexts |
-| 2 | `base_answer_probe.py` | runs **qwen3.5:9b on node7 Ollama** over each context → REJECTED style |
-| 3 | `write_chosen.py --teacher <opus\|gemini>` | teacher writes the terse CHOSEN answer |
-| 4 | `build_dataset.py` | filters (PLAN §4), persona-split 90/10, SFT + DPO JSONL |
-| 5 | Unsloth QLoRA SFT → DPO → merge → GGUF | training runbook = deriver repo (TBD values after smoke test) |
+| file | role |
+|---|---|
+| `gen_contexts.py` | **stage 1** — scenarios (peer, conclusions, searches, question, rubric) from any OpenRouter/Anthropic model |
+| `gen_rejected.py` | **stage 2** — the base model (Ollama) answers each scenario on the real Honcho trajectory → *rejected* |
+| `gen_chosen.py` | **stage 3** — the teacher writes the ideal terse answer → *chosen* (any OpenRouter/Anthropic model) |
+| `build_dataset.py` | **stage 4** — join, filter, persona split, emit SFT + DPO JSONL |
+| `train_dialectic.py` | **stage 5** — `check` / `strip` / `sft` / `dpo` / `export` (GPU host, Unsloth venv) |
+| `eval_model.py` | score any Ollama model on held-out scenarios; `compare` two runs |
+| `probe_toolcalls.py` | confirm the tuned model still emits valid tool calls |
+| `verify_all.sh` | post-training A/B: probe + baseline vs tuned on the eval split |
+| `llm_backend.py` | shared: model table, keys, OpenRouter concurrency, Anthropic Message Batches, JSONL helpers |
+| `trajectory.py` | shared: builds the Honcho conversation (system → user → tool calls → tool results); tool schemas; Ollama answer loop |
+| `scoring.py` | shared: the one scorer (coverage, fabrication, abstention, hedge) |
+| `honcho_prompt.py` | verbatim copy of Honcho `src/dialectic/prompts.py` — re-copy on Honcho upgrades, then regenerate data |
+| `verify_pipeline.py`, `mock_or_server.py`, `mock_anth_batch.py` | $0 offline self-test (unit checks + mock end-to-end run) |
+| `list_models.py` | refresh OpenRouter ids/prices for `llm_backend.MODELS` |
+| `smoke10_*.jsonl` | 10 committed rows in the current format, for training plumbing smoke tests |
+| `Modelfile` | Ollama wrapper for the exported GGUF |
 
-`honcho_prompt.py` — verbatim copy of Honcho `src/dialectic/prompts.py` @ main, 2026-09-03 (runtime parity; re-copy on any Honcho upgrade before regenerating).
+All data scripts are **stdlib-only** (no pip). Only `train_dialectic.py` needs the Unsloth venv.
 
-## Setup (trial / Phase B) — stdlib only, no pip installs
+## Why the trajectory format
+
+Honcho's model never sees findings in its system prompt. At runtime it sees the Honcho system
+prompt, the question, its own tool calls, the tool results, and *then* writes the answer. Every
+stage here builds exactly that conversation through `trajectory.build_messages`, so chosen and
+rejected share one prompt and training matches the runtime distribution. Loss is only computed
+on the final assistant turn. Three parity points to re-check whenever Honcho changes:
+`honcho_prompt.py`, `trajectory.TOOL_SCHEMAS`, `trajectory.format_tool_result`.
+
+## Setup
+
+```bash
+cp keys.env.example keys.env      # ANTHROPIC_API_KEY, OPENROUTER_API_KEY, optional OLLAMA_BASE
+python3 verify_pipeline.py        # no key, no network, no GPU — must print GO
+```
+
+Every script reads `keys.env` next to it (or the environment). Key values are never printed.
+
+`--model` accepts an alias (`opus`, `sonnet`, `fable`, `haiku`, `deepseek`, `qwen3max`,
+`gemini-pro`, `gpt5`, `grok46`, `llama70`), `anthropic:<id>` or `openrouter:<vendor/model>`.
+
+Two execution modes on the generation scripts:
+
+* `run` — concurrent synchronous requests (OpenRouter or Anthropic). Writes the output file as it
+  goes, resume-safe (re-run the same command to retry failed rows). `--max-usd` stops submitting
+  once the usage-based spend passes the cap; without it there is no cap.
+* `submit` / `status` / `fetch` — Anthropic **Message Batches**: half price, asynchronous, usually
+  done within an hour. The estimate is printed for reference and never aborts. Manifests live in
+  `results/batches/<contexts|chosen>/`.
+
+## Run the pipeline
+
+```bash
+# 0. what will it cost?
+python3 gen_contexts.py estimate --n 3000 --model deepseek
+python3 gen_chosen.py   estimate --contexts data/contexts.jsonl --model opus
+
+# 1. scenarios (DeepSeek via OpenRouter, 8 in flight; or --model opus + submit/fetch)
+python3 gen_contexts.py run --n 3000 --model deepseek --out data/contexts.jsonl --concurrency 8
+
+# 2. the base model's own answers = rejected (Ollama host; slow — one request at a time by default)
+python3 gen_rejected.py --contexts data/contexts.jsonl --out data/rejected.jsonl \
+    --base http://node7.ea.org:11434/v1 --model qwen3.5:9b
+
+# 3. teacher answers = chosen (Opus, batch = 50% price)
+python3 gen_chosen.py submit --contexts data/contexts.jsonl --model opus --out data/chosen.jsonl
+python3 gen_chosen.py status
+python3 gen_chosen.py fetch                 # polls until ended, writes data/chosen.jsonl
+
+# 4. filter + split (prints every drop reason and the per-category counts)
+python3 build_dataset.py --contexts data/contexts.jsonl --rejected data/rejected.jsonl \
+    --chosen data/chosen.jsonl --out data/dataset
+#   -> data/dataset_{train,eval}.{sft,dpo}.jsonl
+```
+
+Sizing: a 3 000-scenario run costs roughly $5 for contexts on DeepSeek and $10–25 for Opus
+batch answers; the estimate commands print current numbers. Expect 20–30 % of rows to be dropped
+by the filters; generate accordingly.
+
+## Train (GPU host)
+
+```bash
+# token lengths and the trainable tail of one row — no GPU; do this before every run
+python3 train_dialectic.py --stage check --model Qwen/Qwen3-8B --data data/dataset_train.sft.jsonl --max-seq 6144
+
+python3 train_dialectic.py --stage sft --model Qwen/Qwen3-8B --data data/dataset_train.sft.jsonl \
+    --eval-data data/dataset_eval.sft.jsonl --out runs/v1-sft
+python3 train_dialectic.py --stage dpo --sft runs/v1-sft/merged --data data/dataset_train.dpo.jsonl --out runs/v1-dpo
+python3 train_dialectic.py --stage export --model runs/v1-dpo/merged --out runs/v1-gguf
+# edit Modelfile FROM -> runs/v1-gguf/*.gguf, then:  ollama create dialectic-v1 -f Modelfile
+```
+
+* 12 GB card: defaults (`--load-bits 4 --max-seq 6144`). 48 GB A6000: `--load-bits 16 --max-seq 8192`.
+* Rows longer than `--max-seq` are **dropped, never truncated** (`check` tells you how many).
+* Defaults: SFT 3 epochs at 2e-4; DPO 2 epochs at 1e-5, β 0.1, summed log-probs. Adapters merge to 16-bit.
+* For the real Qwen3.5 9B text backbone run `--stage strip --model Qwen/Qwen3.5-9B --out /path/qwen35-9b-text` first
+  and pass that directory as `--model`.
+
+## Evaluate
+
+```bash
+# baseline vs tuned on the held-out personas + tool-call probe, one command
+BASE=http://node7.ea.org:11434 TUNED=dialectic-v1 BASELINE=qwen3.5:9b bash verify_all.sh
+
+# or by hand
+python3 eval_model.py --contexts data/contexts.jsonl --ids-from data/dataset_eval.dpo.jsonl --model qwen3.5:9b   --out results/eval_base.jsonl
+python3 eval_model.py --contexts data/contexts.jsonl --ids-from data/dataset_eval.dpo.jsonl --model dialectic-v1 --out results/eval_v1.jsonl
+python3 eval_model.py compare results/eval_base.jsonl results/eval_v1.jsonl
+python3 probe_toolcalls.py --model dialectic-v1 --base http://node7.ea.org:11434
+```
+
+The final gate is the real Honcho loop (PLAN §6): point one `DIALECTIC_LEVELS__*` model at the
+new Ollama name and run the verbosity harness.
+
+## Offline testing
+
+`python3 verify_pipeline.py` starts the two mock servers on free ports and drives every stage
+(sync + batch, both providers, rejected, dataset, eval, training data prep with a fake tokenizer).
+To poke at one script by hand:
+
+```bash
+python3 mock_or_server.py 9911 &        # OpenAI-compatible: OpenRouter and Ollama /v1 shapes
+python3 mock_anth_batch.py 9977 &       # Anthropic sync Messages + Message Batches
+OPENROUTER_BASE=http://127.0.0.1:9911/v1 OPENROUTER_API_KEY=mock python3 gen_contexts.py run --n 6 --model deepseek --out /tmp/t/contexts.jsonl
+ANTHROPIC_API_BASE=http://127.0.0.1:9977 ANTHROPIC_API_KEY=mock python3 gen_chosen.py submit --contexts /tmp/t/contexts.jsonl --model opus
+```
+
+## Data formats
 
 ```
-cp keys.env.example keys.env   # paste OPENROUTER_API_KEY only, never commit
-bash run_trial.sh              # estimate -> gen -> run -> collect
+contexts.jsonl   {id, category, domain, persona:{name,bio}, question,
+                  observations:[{date,text,relevant}], searches:[{tool,query,results:[idx]}],
+                  required_facts:[..], forbidden_facts:[..]}          (failed: {id, "__failed__": "..."} )
+rejected.jsonl   {id, category, answer, words, extra_calls, forced}
+chosen.jsonl     {id, category, answer, words, teacher, score}        (failed: answer = "__FAILED__: ...")
+*.sft.jsonl      {id, category, messages:[system,user,assistant(tool_calls),tool,...,assistant], tools:[..]}
+*.dpo.jsonl      {id, category, prompt:[...same prefix...], tools:[..], chosen, rejected}
 ```
-
-`run_trial.sh` loads `keys.env` itself. Wallet caps: per-step pre-estimate abort
-(`--max-usd`) plus a live running-dollar check inside `run` (default cap $5/step).
-Results land in `results/openrouter/` and a tarball in `results/` for copying back.
-
-## Key files
-
-- `PLAN.md` — project doc, decision log, phase status
-- `run_trial.sh` / `openrouter_trial.py` — Phase B teacher A/B via OpenRouter (wallet-safe)
-- `mock_or_server.py` + `verify_pipeline.py` — self-tests (zero cost)
-- `results/openrouter/` — Phase B outputs (contexts, per-arm answers, `summary.json`, `blind-review.csv`)
-- `dataset_{train,eval}_{sft,dpo}.jsonl` — outputs of `build_dataset.py` (Phase C)
-- `Modelfile` — Ollama wrapper for the final model

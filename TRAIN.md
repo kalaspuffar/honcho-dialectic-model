@@ -286,3 +286,21 @@ refusal, rejected = refusal + context-disclosure), not a capability problem.
   and re-slice the first 10 rows into `smoke10_*` (or have Daniel re-slice — that's a one-liner, see `train_dialectic.py --make-smoke` which I'll leave as a no-op stub if I didn't add it).
 - **Prompt** (`honcho_prompt.py`): if Honcho changes the dialectic prompt upstream, re-run stages 1-4 to regenerate data (per R1 in PLAN.md §8). The data is prompt-locked.
 - **Modelfile**: one per checkpoint (`.smoke`, `.v0`, `.v1`, …) so we can A/B without re-exporting.
+
+| 2026-09-10 | sft (all three full runs, 500/1000/2000 rows) | Models indistinguishable. Root cause: `train_ds, test_ds = (SFTDS(samples[:7]), SFTDS(samples[7:])) if len(samples) > 8 else (ds, None)` — smoke-test leftover since v0.5.1; every run trained on the first 7 rows and "evaluated" on the rest. | v0.8.0: full file trains; `--eval-data` or an automatic 5 % hold-out (cap 64); rows shuffled with `--seed`. `verify_pipeline.py` fails on any `samples[:7]`. |
+| 2026-09-10 | dpo (all three full runs) | Effectively a no-op: lr 5e-7 on a LoRA adapter (full-fine-tune scale), per-token length-normalised log-probs (removes most of the length signal), and `seqlogp` gathered token *t* against the logits at position *t* instead of *t−1*. | v0.8.0: lr 1e-5, 2 epochs, summed log-probs over answer tokens with the correct shift; `--dpo-length-norm` restores the old normalisation for comparison; logs margin and accuracy. |
+| 2026-09-10 | merge | `merge_and_unload()` on a 4-bit base re-quantises the merged weights, then export quantises again to Q4_K_M. | v0.8.0: `save_pretrained_merged(..., save_method="merged_16bit")` when Unsloth offers it; `merge_and_unload` is the fallback. |
+| 2026-09-10 | data | Rows were system-prompt "RETRIEVAL CACHE" + question; Honcho's synthesis turn follows tool calls and tool results. Silent truncation at `--max-seq` could cut the answer. | v0.8.0: trajectory rows (`trajectory.build_messages`), tokenised through the chat template with `tools=`; loss on the final turn only; over-long rows dropped and counted; `--stage check` reports lengths and the trainable tail. |
+
+## 9. v0.8.0 runbook delta (2026-09-10)
+
+- Data files come from `build_dataset.py` in the trajectory format; `smoke10_*.jsonl` were converted
+  to it (same chosen/rejected text; the rejected side was generated under the old prompt, fine for
+  plumbing tests only).
+- Before training: `python3 train_dialectic.py --stage check --model <base> --data <sft.jsonl> --max-seq 6144`.
+  Trajectory rows run ~4–5k tokens (system prompt ~3k). Raise `--max-seq` rather than accept drops.
+- Qwen3's chat template renders the final assistant turn with an empty `<think>` block, so the
+  model is trained to answer without thinking; tool calls / tool results render as
+  `<tool_call>` / `<tool_response>`, the same text Ollama's Qwen3 template produces at runtime.
+- First real experiment: one model on ~500 rows with defaults, `verify_all.sh` against the base on the
+  eval split. Size sweeps only after that shows a clear gap.

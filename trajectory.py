@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""trajectory.py — build the Honcho-shaped conversation every stage shares.
+
+Honcho's dialectic model never sees "findings in the system prompt". At runtime
+it sees:
+
+    system    agent_system_prompt(observer, observed, ...)   (honcho_prompt.py, verbatim copy)
+    user      the question
+    assistant tool_calls: search_memory(...)                  (one or more rounds)
+    tool      the retrieved conclusions
+    ...
+    assistant the synthesized answer                         <- the only turn we train on
+
+Every stage (rejected generation, chosen generation, dataset build, eval) builds
+its messages through `build_messages(ctx)` so chosen and rejected share one
+prompt and training matches the runtime distribution (PLAN risk R1/R2).
+
+PARITY POINTS (re-copy from Honcho when it changes, then regenerate data):
+  * honcho_prompt.py                — verbatim `src/dialectic/prompts.py`
+  * TOOL_SCHEMAS below              — parameter names of the dialectic tools
+  * format_tool_result() below      — how a tool result is rendered to the model
+
+Context row schema (output of gen_contexts.py):
+  {id, category, domain,
+   persona: {name, bio},
+   question,
+   observations: [{date, text, relevant: bool}],
+   searches:     [{tool, query, results: [observation index, ...]}],
+   required_facts: [...], forbidden_facts: [...]}
+"""
+import json
+import urllib.request
+
+from honcho_prompt import agent_system_prompt
+
+TOOLS = ["search_memory", "search_messages", "grep_messages", "get_reasoning_chain",
+         "get_observation_context", "get_messages_by_date_range", "search_messages_temporal"]
+
+SEARCH_TOOLS = ("search_memory", "search_messages", "grep_messages")
+
+_Q = {"type": "string", "description": "Search query"}
+_PAIR = {"observer": {"type": "string", "description": "Peer whose model this is"},
+         "observed": {"type": "string", "description": "Peer the conclusions are about"}}
+TOOL_SCHEMAS = [
+    {"type": "function", "function": {"name": "search_memory",
+     "description": "Semantic search over conclusions about this pair.",
+     "parameters": {"type": "object", "properties": {"query": _Q, **_PAIR,
+                    "top_k": {"type": "integer", "description": "Max results"}},
+                    "required": ["query", "observer", "observed"]}}},
+    {"type": "function", "function": {"name": "search_messages",
+     "description": "Semantic search over messages in this query's scope.",
+     "parameters": {"type": "object", "properties": {"query": _Q,
+                    "top_k": {"type": "integer"}}, "required": ["query"]}}},
+    {"type": "function", "function": {"name": "grep_messages",
+     "description": "Exact text search. Use for names, dates, keywords.",
+     "parameters": {"type": "object", "properties": {"query": _Q}, "required": ["query"]}}},
+    {"type": "function", "function": {"name": "get_reasoning_chain",
+     "description": "Premises and downstream conclusions for a specific conclusion.",
+     "parameters": {"type": "object", "properties": {"conclusion_id": {"type": "string"}},
+                    "required": ["conclusion_id"]}}},
+    {"type": "function", "function": {"name": "get_observation_context",
+     "description": "Messages around a specific conclusion.",
+     "parameters": {"type": "object", "properties": {"conclusion_id": {"type": "string"}},
+                    "required": ["conclusion_id"]}}},
+    {"type": "function", "function": {"name": "get_messages_by_date_range",
+     "description": "Messages in a time window.",
+     "parameters": {"type": "object", "properties": {"start_date": {"type": "string"},
+                    "end_date": {"type": "string"}}, "required": ["start_date", "end_date"]}}},
+    {"type": "function", "function": {"name": "search_messages_temporal",
+     "description": "Semantic search with a date filter.",
+     "parameters": {"type": "object", "properties": {"query": _Q,
+                    "start_date": {"type": "string"}, "end_date": {"type": "string"}},
+                    "required": ["query"]}}},
+]
+
+NO_RESULTS = "No results found."
+
+
+def peer_name(ctx) -> str:
+    p = ctx.get("persona")
+    if isinstance(p, dict):
+        return p.get("name") or "User"
+    return "User"
+
+
+def system_prompt(ctx) -> str:
+    n = peer_name(ctx)
+    return agent_system_prompt(n, n, None, None, TOOLS).strip()
+
+
+def format_tool_result(tool: str, observations) -> str:
+    """Render retrieved conclusions/messages the way the model sees a tool result."""
+    if not observations:
+        return NO_RESULTS
+    if tool == "search_memory":
+        rows = [{"content": o["text"], "created_at": f"{o['date']}T{_fake_time(i)}Z",
+                 "level": "explicit"} for i, o in enumerate(observations)]
+    else:  # message-style hits
+        rows = [{"content": o["text"], "created_at": f"{o['date']}T{_fake_time(i)}Z"}
+                for i, o in enumerate(observations)]
+    return json.dumps(rows, ensure_ascii=False, indent=1)
+
+
+def _fake_time(i: int) -> str:
+    return f"{9 + (i * 3) % 12:02d}:{(i * 17) % 60:02d}:00"
+
+
+def tool_arguments(ctx, search) -> dict:
+    n = peer_name(ctx)
+    tool = search.get("tool", "search_memory")
+    args = {"query": search.get("query", ctx["question"])}
+    if tool == "search_memory":
+        args.update(observer=n, observed=n, top_k=15)
+    elif tool == "search_messages":
+        args["top_k"] = 15
+    return args
+
+
+def searches_for(ctx):
+    """Validated search plan; falls back to one search_memory over everything."""
+    obs = ctx.get("observations") or []
+    plan = []
+    for s in ctx.get("searches") or []:
+        idx = [i for i in (s.get("results") or []) if isinstance(i, int) and 0 <= i < len(obs)]
+        tool = s.get("tool") if s.get("tool") in SEARCH_TOOLS else "search_memory"
+        if s.get("query"):
+            plan.append({"tool": tool, "query": s["query"], "results": idx})
+    if not plan:
+        plan = [{"tool": "search_memory", "query": ctx["question"], "results": list(range(len(obs)))}]
+    return plan
+
+
+def build_messages(ctx, arguments_as_string=False):
+    """[system, user, (assistant tool_calls, tool)*] — the prefix before the answer.
+    `arguments_as_string=True` for OpenAI-compatible HTTP (Ollama); dicts for datasets."""
+    obs = ctx.get("observations") or []
+    msgs = [{"role": "system", "content": system_prompt(ctx)},
+            {"role": "user", "content": ctx["question"]}]
+    for k, s in enumerate(searches_for(ctx)):
+        call_id = f"call_{ctx.get('id', 'x')}_{k}"
+        args = tool_arguments(ctx, s)
+        msgs.append({"role": "assistant", "content": "",
+                     "tool_calls": [{"id": call_id, "type": "function",
+                                     "function": {"name": s["tool"],
+                                                  "arguments": json.dumps(args) if arguments_as_string else args}}]})
+        msgs.append({"role": "tool", "tool_call_id": call_id, "name": s["tool"],
+                     "content": format_tool_result(s["tool"], [obs[i] for i in s["results"]])})
+    return msgs
+
+
+def stringify_tool_args(msgs):
+    out = []
+    for m in msgs:
+        if m.get("tool_calls"):
+            m = dict(m, tool_calls=[
+                dict(tc, function=dict(tc["function"], arguments=(
+                    tc["function"]["arguments"] if isinstance(tc["function"]["arguments"], str)
+                    else json.dumps(tc["function"]["arguments"])))) for tc in m["tool_calls"]])
+        out.append(m)
+    return out
+
+
+# ------------------------------------------------------------- Ollama answering
+def _chat(base, body, timeout=900):
+    req = urllib.request.Request(base.rstrip("/") + "/chat/completions",
+                                 data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read())["choices"][0]["message"]
+
+
+def answer_with_ollama(base, model, ctx, max_rounds=3, temperature=0.3, max_tokens=1500):
+    """Run the student model on the trajectory, the way Honcho's loop would.
+
+    If the model asks for more tool calls we answer each with NO_RESULTS (the
+    scenario's retrieval is already complete) for up to `max_rounds`, then force
+    a synthesis turn by dropping the tool schemas. Returns
+    {"answer", "extra_calls", "forced"}."""
+    msgs = build_messages(ctx, arguments_as_string=True)
+    extra, forced = 0, False
+    for _ in range(max_rounds):
+        m = _chat(base, {"model": model, "temperature": temperature, "max_tokens": max_tokens,
+                         "messages": msgs, "tools": TOOL_SCHEMAS})
+        calls = m.get("tool_calls") or []
+        if not calls:
+            return {"answer": (m.get("content") or "").strip(), "extra_calls": extra, "forced": forced}
+        msgs.append({"role": "assistant", "content": m.get("content") or "", "tool_calls": calls})
+        for tc in calls:
+            extra += 1
+            msgs.append({"role": "tool", "tool_call_id": tc.get("id", f"call_extra_{extra}"),
+                         "name": (tc.get("function") or {}).get("name", ""), "content": NO_RESULTS})
+    forced = True
+    m = _chat(base, {"model": model, "temperature": temperature, "max_tokens": max_tokens,
+                     "messages": msgs})
+    return {"answer": (m.get("content") or "").strip(), "extra_calls": extra, "forced": forced}
