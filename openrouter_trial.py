@@ -385,6 +385,7 @@ def anth_get(url, key, timeout=120):
 
 def row_block(c):
     """Per-row user content (BRIEFING lives in the cached system block in batch mode)."""
+    print(c['id'])
     return ("PERSONA: " + c["persona"]
             + "\n\nFINDINGS:\n" + "\n".join(f"- [{f['date']}] {f['text']}" for f in c["findings"])
             + "\n\nDistractors (WRONG - do not assert):\n" + "\n".join("- " + d for d in c["distractors"])

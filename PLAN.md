@@ -238,7 +238,18 @@ back to this host → I fold `summary.json` + your blind-review picks into §3.2
   trial arms to compare gen quality next) and lock per-step model assignments before full volume.
   Committed + tagged `v0.2.0`.
 
-## 11. Immediate next actions (owner: Daniel unless noted)
+## 11. Trained model inventory (Daniel, 2026-09-09)
+
+| Ollama name | records trained | note |
+|---|---|---|
+| `dialectic_1` | **500** | |
+| `dialectic_2` | **2000** | names are NOT in record-count order |
+| `dialectic_3` | **1000** | |
+| `dialectic-qwen3.5-9b` | 25 | process-verification run |
+
+Validation (2026-09-09): the three are behaviorally indistinguishable — head-to-head 10 wins/9 losses each across 152 common rows; all ~0.68–0.70 coverage vs base 0.663; all ~1.5× more terse than base; all serve 16k/32k context fine via `num_ctx` override (no retrain needed). Full write-up + open questions (why 500≈2000: method vs data-prep vs premise) in vault `active-projects/Honcho-Dialectic-Verbosity-Report.md` §11.
+
+## 12. Immediate next actions (owner: Daniel unless noted)
 
 1. **(done, Daniel)** `keys.env` has an `OPENROUTER_API_KEY` (used in first live run 2026-09-04).
 2. **Daniel** Re-run on the same box as before:
