@@ -327,6 +327,7 @@ Validation (2026-09-09): the three are behaviorally indistinguishable — head-t
 - **2026-09-11** Base-model correction. Stale defaults in `train_dialectic.py` (`--model Qwen/Qwen3-8B`,
   alias `qwen3.5:9b -> Qwen/Qwen3-8B`) and a stale TRAIN.md §2 note pointed a run at Qwen3-8B. §3.4
   stands: the base is the **stripped text-only Qwen3.5-9B** (`/data/smoke/qwen35-9b-text`); Qwen3-8B
-  is the fallback only and must be named explicitly. `--model` is now required. Baseline eval column
-  moved to OpenRouter: `qwen3.5:9b` via Ollama `/v1` answers inside `<think>` and returns empty
-  content (31/50 rows), and `/v1` ignores `"think": false` (TRAIN.md §7).
+  is the fallback only and must be named explicitly. `--model` is now required. Baseline eval column:
+  `qwen3.5:9b` via Ollama answers inside `<think>` and returns empty content (31/50 rows); Qwen3.5
+  cannot disable thinking, which is part of why we fine-tune. The eval scores the base's reasoning
+  text when content is empty (`--answer-from-reasoning`) and reports the count (TRAIN.md §7).

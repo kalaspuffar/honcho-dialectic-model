@@ -42,11 +42,14 @@ def run(a):
                                    max_tokens=a.max_tokens, api_key=api_key)
         except Exception as e:  # noqa: BLE001
             r = {"answer": "", "extra_calls": 0, "forced": False, "error": f"{type(e).__name__}: {e}"}
-        s = scoring.score_answer(c, r["answer"])
-        return c, {"id": c["id"], "category": c.get("category"), "answer": r["answer"],
+        reasoning = r.get("reasoning") or ""
+        in_thinking = not r["answer"] and bool(reasoning)      # answered inside <think>, empty content
+        answer = reasoning.strip() if (in_thinking and a.answer_from_reasoning) else r["answer"]
+        s = scoring.score_answer(c, answer)
+        return c, {"id": c["id"], "category": c.get("category"), "answer": answer,
                    "extra_calls": r.get("extra_calls", 0), "forced": r.get("forced", False),
-                   "finish_reason": r.get("finish_reason"), "reasoning_chars": r.get("reasoning_chars", 0),
-                   "error": r.get("error", ""), **s}
+                   "finish_reason": r.get("finish_reason"), "answered_in_thinking": in_thinking,
+                   "reasoning_chars": len(reasoning), "error": r.get("error", ""), **s}
 
     rows, scores, used = [], [], []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, a.concurrency)) as ex:
@@ -57,9 +60,11 @@ def run(a):
     agg = scoring.aggregate(used, scores)
     agg.update(model=a.model, forced_rows=sum(1 for r in rows if r["forced"]),
                rows_with_extra_tool_calls=sum(1 for r in rows if r["extra_calls"]),
-               # empty answer but reasoning text came back: the model answered inside <think> and
-               # stopped — a serving-path problem (Ollama /v1 + qwen3.5:9b), not an eval of the model
-               answered_in_thinking_rows=sum(1 for r in rows if r["words"] == 0 and r.get("reasoning_chars")))
+               # content empty, reasoning text present: the model answered inside <think> and stopped
+               # (qwen3.5:9b on Ollama). Honcho would see nothing. With --answer-from-reasoning the
+               # reasoning text is scored instead so the base still yields words/coverage numbers.
+               answered_in_thinking_rows=sum(1 for r in rows if r["answered_in_thinking"]),
+               scored_from_reasoning=bool(a.answer_from_reasoning))
     be.write_jsonl(a.out, rows)
     with open(os.path.splitext(a.out)[0] + ".summary.json", "w") as f:
         json.dump(agg, f, indent=2)
@@ -76,7 +81,7 @@ def compare(a):
             sys.exit(f"missing {sp} (produced by a run)")
     keys = ["model", "n", "median_words", "mean_words", "max_words", "mean_coverage",
             "fabrication_rows", "abstention_correct", "hedge_rows", "empty_rows", "answered_in_thinking_rows",
-            "forced_rows", "rows_with_extra_tool_calls"]
+            "scored_from_reasoning", "forced_rows", "rows_with_extra_tool_calls"]
     w = max(len(k) for k in keys)
     print(" " * w + "  " + "  ".join(f"{str(t.get('model', '?')):>18}" for t in tables))
     for k in keys[1:]:
@@ -97,6 +102,10 @@ def main():
     p.add_argument("--max-rounds", type=int, default=3)
     p.add_argument("--max-tokens", type=int, default=1024)
     p.add_argument("--temperature", type=float, default=0.1)
+    p.add_argument("--answer-from-reasoning", action="store_true",
+                   help="when content is empty but a reasoning field came back, score the reasoning text "
+                        "(baseline column: qwen3.5:9b on Ollama answers inside <think>; the summary still "
+                        "reports answered_in_thinking_rows)")
     p = sub.add_parser("compare"); p.set_defaults(fn=compare)
     p.add_argument("files", nargs="+")
     argv = sys.argv[1:]

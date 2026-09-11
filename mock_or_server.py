@@ -98,6 +98,9 @@ class H(BaseHTTPRequestHandler):
         else:
             content = "mock: unrecognised request shape"
         msg = {"role": "assistant", "content": content}
+        if "thinker" in body.get("model", "") and not tool_calls:   # qwen3.5:9b-on-Ollama shape: answer inside <think>, empty content
+            msg["reasoning"] = "Let me verify. " + content
+            msg["content"] = ""
         if tool_calls:
             msg["tool_calls"] = tool_calls
         resp = {"choices": [{"message": msg, "finish_reason": "tool_calls" if tool_calls else ("stop" if content is not None else "content_filter")}],

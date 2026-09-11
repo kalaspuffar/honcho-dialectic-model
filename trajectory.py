@@ -183,7 +183,7 @@ def _chat(base, body, timeout=900, api_key=None):
     m["_finish_reason"] = ch.get("finish_reason")
     # Ollama's /v1 and OpenRouter split the model's <think> text into a side field; qwen3.5:9b on
     # Ollama puts its whole answer there and stops with EMPTY content (TRAIN.md §7, 2026-09-11).
-    m["_reasoning_chars"] = len(m.get("reasoning") or m.get("reasoning_content") or "")
+    m["_reasoning"] = (m.get("reasoning") or m.get("reasoning_content") or "")
     return m, data.get("usage") or {}
 
 
@@ -200,9 +200,10 @@ def answer_with_ollama(base, model, ctx, max_rounds=3, temperature=0.3, max_toke
     If the model asks for more tool calls we answer each with NO_RESULTS (the
     scenario's retrieval is already complete) for up to `max_rounds`, then force
     a synthesis turn by dropping the tool schemas. Returns
-    {"answer", "extra_calls", "forced", "finish_reason", "reasoning_chars",
-     "usage": {"prompt_tokens", "completion_tokens"}}. `reasoning_chars` > 0 with an empty
-    answer means the model answered inside its thinking block (a serving-path problem)."""
+    {"answer", "extra_calls", "forced", "finish_reason", "reasoning",
+     "usage": {"prompt_tokens", "completion_tokens"}}. A non-empty `reasoning` with an empty
+    `answer` means the model wrote its answer inside the thinking block and stopped — what
+    qwen3.5:9b does on Ollama, and what the fine-tune is meant to remove."""
     msgs = build_messages(ctx, arguments_as_string=True)
     extra, forced, usage = 0, False, {}
     for _ in range(max_rounds):
@@ -226,7 +227,7 @@ def answer_with_ollama(base, model, ctx, max_rounds=3, temperature=0.3, max_toke
 
 def _result(m, extra, forced, usage):
     return {"answer": (m.get("content") or "").strip(), "extra_calls": extra, "forced": forced,
-            "finish_reason": m.get("_finish_reason"), "reasoning_chars": m.get("_reasoning_chars", 0),
+            "finish_reason": m.get("_finish_reason"), "reasoning": m.get("_reasoning", ""),
             "usage": usage}
 
 

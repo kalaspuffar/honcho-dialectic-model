@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # verify_all.sh — post-training A/B on the held-out split + tool-call probe.
 #   BASE=http://node7.ea.org:11434 TUNED=dialectic-v1 BASELINE=qwen3.5:9b bash verify_all.sh
-# The baseline EVAL column runs on OpenRouter by default (EVAL_BASELINE=qwen9b, needs OPENROUTER_API_KEY):
-# qwen3.5:9b through Ollama's /v1 answers inside its <think> block and returns empty content on most
-# rows, and /v1 ignores "think": false (TRAIN.md §7, 2026-09-11). Set EVAL_BASELINE to an Ollama tag
-# to force the local path anyway. BASELINE stays the Ollama tag for the tool-call probe control.
+# Baseline column: qwen3.5:9b cannot switch thinking off and, through Ollama's /v1, writes its answer
+# inside <think> and returns empty content on most rows (TRAIN.md §7, 2026-09-11). Honcho would see
+# nothing — that is the base's real behaviour and one reason for the fine-tune. To still get words /
+# coverage / fabrication numbers for the base, its eval scores the reasoning text when content is empty
+# (--answer-from-reasoning); the summary reports answered_in_thinking_rows. The tuned column never
+# gets that fallback. EVAL_BASELINE=qwen9b runs the baseline on OpenRouter instead (needs credits).
 set -uo pipefail
 cd "$(dirname "$0")"
 BASE="${BASE:-http://localhost:11434}"
 TUNED="${TUNED:-dialectic-v1}"
 BASELINE="${BASELINE:-qwen3.5:9b}"
-EVAL_BASELINE="${EVAL_BASELINE:-qwen9b}"
+EVAL_BASELINE="${EVAL_BASELINE:-$BASELINE}"
 CTX="${CTX:-data/contexts.jsonl}"
 EVAL_IDS="${EVAL_IDS:-data/dataset_eval.dpo.jsonl}"
 OUT=results/ab_$(date +%Y%m%d-%H%M%S)
@@ -25,7 +27,7 @@ if [[ "$EVAL_BASELINE" == *"/"* || "$EVAL_BASELINE" == openrouter:* || "$EVAL_BA
 else
   BL_BASE=(--base "$BASE/v1")      # an Ollama tag
 fi
-python3 eval_model.py --contexts "$CTX" --ids-from "$EVAL_IDS" --model "$EVAL_BASELINE" "${BL_BASE[@]}" --out "$OUT/eval_baseline.jsonl" 2>"$OUT/eval_baseline.log"
+python3 eval_model.py --contexts "$CTX" --ids-from "$EVAL_IDS" --model "$EVAL_BASELINE" "${BL_BASE[@]}" --answer-from-reasoning --out "$OUT/eval_baseline.jsonl" 2>"$OUT/eval_baseline.log"
 echo "[3/4] tuned on the eval split"
 python3 eval_model.py --contexts "$CTX" --ids-from "$EVAL_IDS" --model "$TUNED" --base "$BASE/v1" --out "$OUT/eval_tuned.jsonl" 2>"$OUT/eval_tuned.log"
 echo "[4/4] tool-calling probe (baseline control)"

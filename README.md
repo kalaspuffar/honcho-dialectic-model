@@ -133,7 +133,7 @@ python3 train_dialectic.py --stage dpo --sft runs/v1-sft-ep1/merged --data data/
 
 ```bash
 # baseline vs tuned on the held-out personas + tool-call probe, one command
-BASE=http://node7.ea.org:11434 TUNED=dialectic-v1 BASELINE=qwen3.5:9b bash verify_all.sh   # baseline eval column on OpenRouter (EVAL_BASELINE=qwen9b) — see TRAIN.md §7 2026-09-11
+BASE=http://node7.ea.org:11434 TUNED=dialectic-v1 BASELINE=qwen3.5:9b bash verify_all.sh   # baseline scored with --answer-from-reasoning (qwen3.5:9b answers inside <think>) — TRAIN.md §7 2026-09-11
 
 # or by hand
 python3 eval_model.py --contexts data/contexts.jsonl --ids-from data/dataset_eval.dpo.jsonl --model qwen3.5:9b   --out results/eval_base.jsonl

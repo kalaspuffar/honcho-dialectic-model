@@ -111,8 +111,11 @@ Invariants that span files:
   §3.4, TRAIN.md §0b), matching production `low` = `qwen3.5:9b`. `Qwen/Qwen3-8B` is the fallback only
   if Qwen3.5 hits a LoRA-format problem and must be named explicitly. `--model` has no default; the
   Ollama tag and the VL Hub repo are rejected with a pointer to strip.
-- The baseline eval column runs on OpenRouter (`verify_all.sh` `EVAL_BASELINE=qwen9b`): `qwen3.5:9b`
-  through Ollama's `/v1` answers inside `<think>` and returns empty content, and `/v1` ignores
-  `"think": false` (TRAIN.md §7, 2026-09-11).
+- Qwen3.5 cannot switch thinking off (the template always opens `<think>`); `qwen3.5:9b` on Ollama
+  writes its answer inside it and returns empty content. That is the base's real behaviour and one
+  reason for the fine-tune, which trains the model to close the block at once. The baseline eval
+  column therefore runs on Ollama with `--answer-from-reasoning` (verify_all.sh), which scores the
+  reasoning text when content is empty and reports `answered_in_thinking_rows`; the tuned column never
+  gets that fallback. OpenRouter (`EVAL_BASELINE=qwen9b`) is optional and needs credits.
 - DPO needs `remove_unused_columns=False`; `pad_collator` must return int64 tensors and pad labels
   with -100; GGUF export passes the tokenizer as the second positional and introspects the quant kwarg.

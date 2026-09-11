@@ -256,6 +256,17 @@ if "--quick" not in sys.argv:
         ok("eval_model run", r.returncode == 0 and os.path.exists(f"{tmp}/eval_mock.summary.json"), r.stderr[-300:])
         r = sh([sys.executable, "eval_model.py", "compare", f"{tmp}/eval_mock.jsonl", f"{tmp}/eval_mock.jsonl"])
         ok("eval_model compare", r.returncode == 0 and "median_words" in r.stdout)
+        # baseline shape: answer inside <think>, empty content -> counted, and scored from reasoning only when asked
+        r = sh([sys.executable, "eval_model.py", "--contexts", ctxf, "--ids-from", f"{tmp}/ds_eval.dpo.jsonl", "--model", "thinker",
+                "--base", f"http://127.0.0.1:{p_or}/v1", "--out", f"{tmp}/eval_think.jsonl"])
+        agg = json.load(open(f"{tmp}/eval_think.summary.json")) if r.returncode == 0 else {}
+        ok("eval_model: answered-in-thinking rows counted, content empty", agg.get("answered_in_thinking_rows", 0) > 0
+           and agg.get("empty_rows") == agg.get("answered_in_thinking_rows") and not agg.get("scored_from_reasoning"), r.stderr[-300:])
+        r = sh([sys.executable, "eval_model.py", "--contexts", ctxf, "--ids-from", f"{tmp}/ds_eval.dpo.jsonl", "--model", "thinker",
+                "--base", f"http://127.0.0.1:{p_or}/v1", "--answer-from-reasoning", "--out", f"{tmp}/eval_think2.jsonl"])
+        agg = json.load(open(f"{tmp}/eval_think2.summary.json")) if r.returncode == 0 else {}
+        ok("eval_model: --answer-from-reasoning scores the reasoning text", agg.get("scored_from_reasoning") is True
+           and agg.get("empty_rows") == 0 and agg.get("answered_in_thinking_rows", 0) > 0, r.stderr[-300:])
         # train prep on the real emitted rows with the fake tokenizer
         samples, dropped, kinds = td.prepare_sft(sft, FakeTok(), 100000)
         ok("train prep on emitted sft rows", kinds["answer"] == len(sft) and kinds["tool"] >= len(sft) and dropped == 0,
