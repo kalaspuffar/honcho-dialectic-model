@@ -14,13 +14,16 @@ Stages
   export  merged HF dir -> GGUF Q4_K_M for `ollama create`
 
 Usage (GPU host, Unsloth venv):
-  python3 train_dialectic.py --stage check  --model Qwen/Qwen3-8B --data data/dataset_train.sft.jsonl
-  python3 train_dialectic.py --stage sft    --model Qwen/Qwen3-8B --data data/dataset_train.sft.jsonl \
+  python3 train_dialectic.py --stage strip  --out /data/smoke/qwen35-9b-text        # once per host
+  python3 train_dialectic.py --stage check  --model /data/smoke/qwen35-9b-text --data data/dataset_train.sft.jsonl
+  python3 train_dialectic.py --stage sft    --model /data/smoke/qwen35-9b-text --data data/dataset_train.sft.jsonl \
                                             --eval-data data/dataset_eval.sft.jsonl --out runs/v1-sft
   python3 train_dialectic.py --stage merge  --adapter runs/v1-sft/checkpoint-125 --out runs/v1-sft-ep1
   python3 train_dialectic.py --stage dpo    --sft runs/v1-sft/merged --data data/dataset_train.dpo.jsonl --out runs/v1-dpo
   python3 train_dialectic.py --stage export --model runs/v1-dpo/merged --out runs/v1-gguf
   12 GB card: --load-bits 4 --max-seq 6144.   48 GB A6000: --load-bits 16 --max-seq 8192.
+  Base (PLAN §3.4): the STRIPPED text-only Qwen3.5-9B from --stage strip. Qwen/Qwen3-8B is the
+  documented fallback only if Qwen3.5 hits a LoRA-format problem; pass it explicitly if so.
 
 Data format (build_dataset.py): SFT rows {"messages": [system, user, assistant(tool_calls), tool, ..., assistant], "tools": [...]}
 DPO rows {"prompt": [...same prefix...], "tools": [...], "chosen": str, "rejected": str}. The chat
@@ -43,9 +46,9 @@ import random
 import sys
 
 STRIP_DEFAULT_REPO = "Qwen/Qwen3.5-9B"
+FALLBACK_REPO = "Qwen/Qwen3-8B"      # PLAN §3.4 fallback only — never the default (2026-09-11: an alias to it cost a run)
 MODEL_ALIASES = {
-    "qwen3:8b": "Qwen/Qwen3-8B",      # deriver-proven text base (PLAN §3.4)
-    "qwen3.5:9b": "Qwen/Qwen3-8B",    # the Hub 9B is a VL checkpoint; run --stage strip for the real 9B text backbone
+    "qwen3:8b": FALLBACK_REPO,
 }
 # v0.8.1 (2026-09-11, TRAIN.md §7 + §10): 500-row run overfit SFT after epoch 1 (eval loss .442 → .461 → .596
 # over 3 epochs) and DPO at 1e-5 saturated by step 25/126 (margin then drifted 3 → 25 at zero loss).
@@ -60,6 +63,9 @@ def resolve_base(name: str) -> str:
     n = (name or "").strip()
     if n.endswith(".gguf") or n.startswith("/") or os.path.isdir(n):
         return n
+    if n in ("qwen3.5:9b", STRIP_DEFAULT_REPO):
+        sys.exit(f"{n} is the Ollama tag / VL Hub checkpoint. Train on the text-only checkpoint from "
+                 f"`--stage strip --out <dir>` and pass that dir as --model (TRAIN.md §0b).")
     return MODEL_ALIASES.get(n, n)
 
 
@@ -217,8 +223,9 @@ class ListDS:
 
 # ----------------------------------------------------------------- check
 def run_check(base, data, max_seq, tool_turns="all"):
+    base = resolve_base(base)          # rejects the Ollama tag / VL repo before touching transformers
     from transformers import AutoTokenizer
-    tok = AutoTokenizer.from_pretrained(resolve_base(base))
+    tok = AutoTokenizer.from_pretrained(base)
     rows = read_jsonl(data)
     is_dpo = "prompt" in rows[0]
     if is_dpo:
@@ -304,6 +311,8 @@ def run_merge(adapter_dir, out, max_seq, bits, base):
         model, tokenizer = load_model(adapter_dir, max_seq, bits)
     except Exception as e:  # noqa: BLE001
         print(f"[merge] direct load failed ({type(e).__name__}: {e}); loading base {base} (--model) + PeftModel")
+        if not base:
+            sys.exit("[merge] pass --model <text-only base dir> so the adapter can be attached to it")
         from peft import PeftModel
         model, tokenizer = load_model(resolve_base(base), max_seq, bits)
         model = PeftModel.from_pretrained(model, adapter_dir)
@@ -456,7 +465,9 @@ def main():
     ap.add_argument("--eval-data", help="sft: held-out sft rows (build_dataset *_eval.sft.jsonl)")
     ap.add_argument("--sft", help="dpo: merged HF dir from the sft stage")
     ap.add_argument("--adapter", help="merge: adapter checkpoint dir (runs/x/checkpoint-N or runs/x/adapter)")
-    ap.add_argument("--model", default="Qwen/Qwen3-8B", help="HF repo id / local dir (sft, check, export, strip)")
+    ap.add_argument("--model", default=None,
+                    help="local dir / HF repo id (sft, check, export). Use the --stage strip output dir. "
+                         f"strip: source VL repo, default {STRIP_DEFAULT_REPO}")
     ap.add_argument("--out", help="output dir")
     ap.add_argument("--epochs", type=int, default=None, help=f"default sft {SFT_DEFAULTS['epochs']}, dpo {DPO_DEFAULTS['epochs']}")
     ap.add_argument("--lr", type=float, default=None, help=f"default sft {SFT_DEFAULTS['lr']}, dpo {DPO_DEFAULTS['lr']}")
@@ -475,6 +486,8 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     a = ap.parse_args()
 
+    if a.stage in ("check", "sft", "export") and not a.model:
+        sys.exit("--model required: the text-only checkpoint dir from --stage strip (e.g. /data/smoke/qwen35-9b-text)")
     if a.stage == "check":
         if not a.data: sys.exit("--data required")
         return run_check(a.model, a.data, a.max_seq, a.tool_turns)
@@ -483,8 +496,7 @@ def main():
     if not a.out:
         sys.exit("--out required")
     if a.stage == "strip":
-        repo = a.model if a.model != "Qwen/Qwen3-8B" else STRIP_DEFAULT_REPO
-        run_strip(repo, a.out)
+        run_strip(a.model or STRIP_DEFAULT_REPO, a.out)
     elif a.stage == "sft":
         if not a.data: sys.exit("--data required for sft")
         run_sft(a.data, a.out, a.model, a.epochs or SFT_DEFAULTS["epochs"], a.lr or SFT_DEFAULTS["lr"],

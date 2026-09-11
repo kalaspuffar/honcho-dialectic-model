@@ -99,9 +99,9 @@ by the filters; generate accordingly.
 
 ```bash
 # token lengths and the trainable tail of one row — no GPU; do this before every run
-python3 train_dialectic.py --stage check --model Qwen/Qwen3-8B --data data/dataset_train.sft.jsonl --max-seq 6144
+python3 train_dialectic.py --stage check --model /data/smoke/qwen35-9b-text --data data/dataset_train.sft.jsonl --max-seq 6144
 
-python3 train_dialectic.py --stage sft --model Qwen/Qwen3-8B --data data/dataset_train.sft.jsonl \
+python3 train_dialectic.py --stage sft --model /data/smoke/qwen35-9b-text --data data/dataset_train.sft.jsonl \
     --eval-data data/dataset_eval.sft.jsonl --out runs/v1-sft
 python3 train_dialectic.py --stage dpo --sft runs/v1-sft/merged --data data/dataset_train.dpo.jsonl --out runs/v1-dpo
 python3 train_dialectic.py --stage export --model runs/v1-dpo/merged --out runs/v1-gguf
@@ -133,7 +133,7 @@ python3 train_dialectic.py --stage dpo --sft runs/v1-sft-ep1/merged --data data/
 
 ```bash
 # baseline vs tuned on the held-out personas + tool-call probe, one command
-BASE=http://node7.ea.org:11434 TUNED=dialectic-v1 BASELINE=qwen3.5:9b bash verify_all.sh
+BASE=http://node7.ea.org:11434 TUNED=dialectic-v1 BASELINE=qwen3.5:9b bash verify_all.sh   # baseline eval column on OpenRouter (EVAL_BASELINE=qwen9b) — see TRAIN.md §7 2026-09-11
 
 # or by hand
 python3 eval_model.py --contexts data/contexts.jsonl --ids-from data/dataset_eval.dpo.jsonl --model qwen3.5:9b   --out results/eval_base.jsonl

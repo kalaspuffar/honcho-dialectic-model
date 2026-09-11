@@ -323,3 +323,10 @@ Validation (2026-09-09): the three are behaviorally indistinguishable — head-t
    *2026-09-11:* first run done (overfit SFT + saturated DPO, TRAIN.md §10); evaluate it, then
    retrain the same 500 rows with v0.8.1 defaults before any size sweep.
 4. Then the real gate: Phase D through Honcho's loop (§6).
+
+- **2026-09-11** Base-model correction. Stale defaults in `train_dialectic.py` (`--model Qwen/Qwen3-8B`,
+  alias `qwen3.5:9b -> Qwen/Qwen3-8B`) and a stale TRAIN.md §2 note pointed a run at Qwen3-8B. §3.4
+  stands: the base is the **stripped text-only Qwen3.5-9B** (`/data/smoke/qwen35-9b-text`); Qwen3-8B
+  is the fallback only and must be named explicitly. `--model` is now required. Baseline eval column
+  moved to OpenRouter: `qwen3.5:9b` via Ollama `/v1` answers inside `<think>` and returns empty
+  content (31/50 rows), and `/v1` ignores `"think": false` (TRAIN.md §7).

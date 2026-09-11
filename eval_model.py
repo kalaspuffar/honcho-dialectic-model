@@ -45,6 +45,7 @@ def run(a):
         s = scoring.score_answer(c, r["answer"])
         return c, {"id": c["id"], "category": c.get("category"), "answer": r["answer"],
                    "extra_calls": r.get("extra_calls", 0), "forced": r.get("forced", False),
+                   "finish_reason": r.get("finish_reason"), "reasoning_chars": r.get("reasoning_chars", 0),
                    "error": r.get("error", ""), **s}
 
     rows, scores, used = [], [], []
@@ -55,7 +56,10 @@ def run(a):
                   f"fab={row['fab']} abst={row['abst']} hedge={row['hedge']} extra_calls={row['extra_calls']}", file=sys.stderr)
     agg = scoring.aggregate(used, scores)
     agg.update(model=a.model, forced_rows=sum(1 for r in rows if r["forced"]),
-               rows_with_extra_tool_calls=sum(1 for r in rows if r["extra_calls"]))
+               rows_with_extra_tool_calls=sum(1 for r in rows if r["extra_calls"]),
+               # empty answer but reasoning text came back: the model answered inside <think> and
+               # stopped — a serving-path problem (Ollama /v1 + qwen3.5:9b), not an eval of the model
+               answered_in_thinking_rows=sum(1 for r in rows if r["words"] == 0 and r.get("reasoning_chars")))
     be.write_jsonl(a.out, rows)
     with open(os.path.splitext(a.out)[0] + ".summary.json", "w") as f:
         json.dump(agg, f, indent=2)
@@ -71,8 +75,8 @@ def compare(a):
         else:
             sys.exit(f"missing {sp} (produced by a run)")
     keys = ["model", "n", "median_words", "mean_words", "max_words", "mean_coverage",
-            "fabrication_rows", "abstention_correct", "hedge_rows", "empty_rows", "forced_rows",
-            "rows_with_extra_tool_calls"]
+            "fabrication_rows", "abstention_correct", "hedge_rows", "empty_rows", "answered_in_thinking_rows",
+            "forced_rows", "rows_with_extra_tool_calls"]
     w = max(len(k) for k in keys)
     print(" " * w + "  " + "  ".join(f"{str(t.get('model', '?')):>18}" for t in tables))
     for k in keys[1:]:

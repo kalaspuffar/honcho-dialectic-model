@@ -65,8 +65,9 @@ python3 -c "import unsloth, transformers, torch, trl; \
 #   removed the trl dependency from SFT+DPO entirely).
 # 1c. Base model present
 ollama list | grep -E 'qwen3\.'
-#   qwen3.5:9b    <-- VL model, do NOT use for text DPO (see v0.5.2 notes)
-#   qwen3:8b      <-- deriver-proven text base (this is what we train on)
+#   qwen3.5:9b    <-- Ollama tag = production `low`; the Hub repo is VL. TRAIN ON ITS TEXT-ONLY
+#                     STRIP: /data/smoke/qwen35-9b-text (§0b). This is the base (PLAN §3.4).
+#   qwen3:8b      <-- fallback ONLY if Qwen3.5 hits the LoRA-format snag; never the default
 ```
 
 If `unsloth` is not on node7, first do `pip install -U unsloth` in the same python env that ran the deriver.
@@ -294,7 +295,8 @@ refusal, rejected = refusal + context-disclosure), not a capability problem.
 | 2026-09-11 | sft (v0.8.0, first real 500-row run, 3 epochs at 2e-4) | Overfit after epoch 1: train loss .40 → .25 → .07, eval loss (held-out personas) **.442 → .461 → .596**. The last checkpoint, the worst of the three, was the one merged and handed to DPO. Category mix of the `head -n 500` slice was fine (117/94/69/65/53/52/50), so this is exposure, not data. | v0.8.1: `load_best_model_at_end` on eval loss (the merged model is the best epoch), default 2 epochs, per-epoch eval losses and the chosen checkpoint printed at the end. `--stage merge --adapter runs/x/checkpoint-N` merges an earlier epoch without retraining (checkpoint-125 = epoch 1 of this run). |
 | 2026-09-11 | dpo (v0.8.0, same run, 1e-5, 2 epochs, β 0.1) | Reference correct (step 0 margin exactly 0), but the loss saturated by **step 25 of 126** (acc 1.0 from step 10, loss .04 at step 25); the margin then drifted 3 → 12–25 (= 120–250 nats of log-ratio) over 100 steps at zero loss and grad-norm 1e-4. Starting from an overfit SFT model and summing log-probs over long verbose rejected answers makes the pairs trivially separable. | v0.8.1: lr 3e-6 for 500 rows (1e-5 saturates in 20 % of the run; the v0.7 5e-7 result is not evidence either way — that loss gathered the wrong logit position), 1 epoch, `StopWhenSaturated` callback (`--dpo-stop-loss 0.01 --dpo-stop-patience 10`), step log adds `d_chosen` / `d_rejected` so likelihood displacement is visible. `verify_pipeline.py` range for the default DPO lr widened to 3e-7 … 2e-5. |
 | 2026-09-11 | sft+dpo (v0.8.0 500-row model, `dialectic_500`) | **Tool calling gone**: `probe_toolcalls.py` 0/5 (base qwen3.5:9b 5/5). Every prompt got a text answer with no search; 3 of 5 stated facts about Daniel that were not in context (fabrication), 2 abstained without looking. Eval could not see it — every eval row already contains the tool results, so only the synthesis turn is exercised (there it scored coverage .924, 0 fabrication, 5/5 abstention). Cause: loss only on the final turn, so 500 trajectories × 3 epochs taught "this system prompt → text". | v0.8.1: `--tool-turns all` (default) adds one SFT sample per assistant `tool_calls` turn (prefix up to that point → the call); `check` prints the trainable text of the first tool turn; `verify_pipeline.py` covers the derived rows. `probe_toolcalls.py` must pass before any eval numbers count. |
-| 2026-09-11 | eval (base column) | `qwen3.5:9b` on node7 Ollama: 31/50 empty answers, 15 rows with extra tool calls, median 0 words — not the ~153-word base measured 2026-09-06 (which ran the student on OpenRouter for stage 2). Base column is not a valid baseline. | Open: inspect two empty rows' raw responses (error / reasoning field); likely the thinking budget consumes the 1500 output tokens when tools are attached. Fix the serving path or the eval budget before comparing coverage. |
+| 2026-09-11 | eval (base column) | `qwen3.5:9b` on node7 Ollama: 31/50 empty answers, 15 rows with extra tool calls, median 0 words — not the ~153-word base measured 2026-09-06 (which ran the student on OpenRouter for stage 2). Base column is not a valid baseline. | **Diagnosed** on row c00102: `finish_reason: stop`, 1003 completion tokens of 1500, `reasoning` field 3.7k chars *containing the full answer*, content empty — the model answers inside `<think>` and stops; not a token-cap problem. `"think": false` on `/v1/chat/completions` is ignored (reasoning 1.9k chars, content still empty). Fix: `verify_all.sh` runs the baseline eval column on OpenRouter (`EVAL_BASELINE=qwen9b`, same path as stage 2); eval rows now carry `finish_reason` / `reasoning_chars` and the summary counts `answered_in_thinking_rows`. Note for Honcho: production serves this tag through Ollama too — check which API/think setting its loop uses. |
+| 2026-09-11 | base model | Stale `train_dialectic.py` default `--model Qwen/Qwen3-8B` + alias `qwen3.5:9b -> Qwen/Qwen3-8B` and a stale §2 note ("qwen3:8b is what we train on") led to hours on the wrong base. The base is the stripped text-only Qwen3.5-9B (§0b, PLAN §3.4). | `--model` is now required for check/sft/export, the tag/VL-repo names exit with a pointer to `--stage strip`, and Qwen3-8B is reachable only by naming it explicitly. |
 
 ## 9. v0.8.0 runbook delta (2026-09-10)
 
@@ -379,10 +381,11 @@ shorter (fewer results) so the cost is under 3×. `--tool-turns first` (opening 
 answers) and `none` (v0.8.0) are available. The eval loss now includes tool turns, so it is not
 comparable with the .442 of the previous run.
 
-Retrain plan for the same 500 rows (SFT must be redone; `checkpoint-125` has no tool turns):
+Retrain plan for the same 500 rows (SFT must be redone; `checkpoint-125` has no tool turns).
+`<base>` = `/data/smoke/qwen35-9b-text`, the stripped Qwen3.5-9B (§0b) — **not** Qwen3-8B:
 ```
-python3 train_dialectic.py --stage check --model <base> --data data/train500.sft.jsonl --max-seq 6144   # shows the tool-turn text
-python3 train_dialectic.py --stage sft --model <base> --data data/train500.sft.jsonl --eval-data data/eval50.sft.jsonl --out runs/v2-sft-500
+python3 train_dialectic.py --stage check --model /data/smoke/qwen35-9b-text --data data/train500.sft.jsonl --max-seq 8192   # GATE, see below
+python3 train_dialectic.py --stage sft --model /data/smoke/qwen35-9b-text --data data/train500.sft.jsonl --eval-data data/eval50.sft.jsonl --out runs/v2-sft-500 --load-bits 16 --max-seq 8192
 python3 probe_toolcalls.py --model <sft-only model in ollama>   # optional gate before DPO
 python3 train_dialectic.py --stage dpo --sft runs/v2-sft-500/merged --data data/train500.dpo.jsonl --out runs/v2-dpo-500
 python3 train_dialectic.py --stage export --model runs/v2-dpo-500/merged --out runs/v2-gguf-500
@@ -390,3 +393,9 @@ python3 probe_toolcalls.py --model dialectic_500_v2 ; python3 eval_model.py ...
 ```
 Gate order: probe first (≥ 90 % valid calls), then eval; watch `rows_with_extra_tool_calls` for the
 opposite failure (over-searching) now that search-again turns are trained.
+
+`--stage check` on the stripped Qwen3.5 checkpoint is the pre-run gate, because its chat template is
+the Qwen3.5 one (copied from the VL repo by `--stage strip`), not Qwen3's that §9 describes. Read the
+two `trainable text` lines it prints: the tool-call turn must be exactly one `<tool_call>{...}</tool_call>`
+block (plus the turn's end token) and the answer turn must be the terse answer, optionally preceded by
+an empty think block — nothing from the prompt, no tool results. `dropped` should be 0 at 8192.
