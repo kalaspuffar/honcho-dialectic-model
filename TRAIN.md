@@ -291,6 +291,10 @@ refusal, rejected = refusal + context-disclosure), not a capability problem.
 | 2026-09-10 | dpo (all three full runs) | Effectively a no-op: lr 5e-7 on a LoRA adapter (full-fine-tune scale), per-token length-normalised log-probs (removes most of the length signal), and `seqlogp` gathered token *t* against the logits at position *t* instead of *t−1*. | v0.8.0: lr 1e-5, 2 epochs, summed log-probs over answer tokens with the correct shift; `--dpo-length-norm` restores the old normalisation for comparison; logs margin and accuracy. |
 | 2026-09-10 | merge | `merge_and_unload()` on a 4-bit base re-quantises the merged weights, then export quantises again to Q4_K_M. | v0.8.0: `save_pretrained_merged(..., save_method="merged_16bit")` when Unsloth offers it; `merge_and_unload` is the fallback. |
 | 2026-09-10 | data | Rows were system-prompt "RETRIEVAL CACHE" + question; Honcho's synthesis turn follows tool calls and tool results. Silent truncation at `--max-seq` could cut the answer. | v0.8.0: trajectory rows (`trajectory.build_messages`), tokenised through the chat template with `tools=`; loss on the final turn only; over-long rows dropped and counted; `--stage check` reports lengths and the trainable tail. |
+| 2026-09-11 | sft (v0.8.0, first real 500-row run, 3 epochs at 2e-4) | Overfit after epoch 1: train loss .40 → .25 → .07, eval loss (held-out personas) **.442 → .461 → .596**. The last checkpoint, the worst of the three, was the one merged and handed to DPO. Category mix of the `head -n 500` slice was fine (117/94/69/65/53/52/50), so this is exposure, not data. | v0.8.1: `load_best_model_at_end` on eval loss (the merged model is the best epoch), default 2 epochs, per-epoch eval losses and the chosen checkpoint printed at the end. `--stage merge --adapter runs/x/checkpoint-N` merges an earlier epoch without retraining (checkpoint-125 = epoch 1 of this run). |
+| 2026-09-11 | dpo (v0.8.0, same run, 1e-5, 2 epochs, β 0.1) | Reference correct (step 0 margin exactly 0), but the loss saturated by **step 25 of 126** (acc 1.0 from step 10, loss .04 at step 25); the margin then drifted 3 → 12–25 (= 120–250 nats of log-ratio) over 100 steps at zero loss and grad-norm 1e-4. Starting from an overfit SFT model and summing log-probs over long verbose rejected answers makes the pairs trivially separable. | v0.8.1: lr 3e-6 for 500 rows (1e-5 saturates in 20 % of the run; the v0.7 5e-7 result is not evidence either way — that loss gathered the wrong logit position), 1 epoch, `StopWhenSaturated` callback (`--dpo-stop-loss 0.01 --dpo-stop-patience 10`), step log adds `d_chosen` / `d_rejected` so likelihood displacement is visible. `verify_pipeline.py` range for the default DPO lr widened to 3e-7 … 2e-5. |
+| 2026-09-11 | sft+dpo (v0.8.0 500-row model, `dialectic_500`) | **Tool calling gone**: `probe_toolcalls.py` 0/5 (base qwen3.5:9b 5/5). Every prompt got a text answer with no search; 3 of 5 stated facts about Daniel that were not in context (fabrication), 2 abstained without looking. Eval could not see it — every eval row already contains the tool results, so only the synthesis turn is exercised (there it scored coverage .924, 0 fabrication, 5/5 abstention). Cause: loss only on the final turn, so 500 trajectories × 3 epochs taught "this system prompt → text". | v0.8.1: `--tool-turns all` (default) adds one SFT sample per assistant `tool_calls` turn (prefix up to that point → the call); `check` prints the trainable text of the first tool turn; `verify_pipeline.py` covers the derived rows. `probe_toolcalls.py` must pass before any eval numbers count. |
+| 2026-09-11 | eval (base column) | `qwen3.5:9b` on node7 Ollama: 31/50 empty answers, 15 rows with extra tool calls, median 0 words — not the ~153-word base measured 2026-09-06 (which ran the student on OpenRouter for stage 2). Base column is not a valid baseline. | Open: inspect two empty rows' raw responses (error / reasoning field); likely the thinking budget consumes the 1500 output tokens when tools are attached. Fix the serving path or the eval budget before comparing coverage. |
 
 ## 9. v0.8.0 runbook delta (2026-09-10)
 
@@ -304,3 +308,85 @@ refusal, rejected = refusal + context-disclosure), not a capability problem.
   `<tool_call>` / `<tool_response>`, the same text Ollama's Qwen3 template produces at runtime.
 - First real experiment: one model on ~500 rows with defaults, `verify_all.sh` against the base on the
   eval split. Size sweeps only after that shows a clear gap.
+
+## 10. v0.8.1 — first real 500-row run, read-out (2026-09-11)
+
+Data: `head -n 500` of the 3k trajectory build (mix factual 117 / enumeration 94 / summary 69 /
+preference 65 / contradiction 53 / supersession 52 / abstention 50). Eval: the persona-split
+`dataset_eval` (~300 rows, ~505 s per pass).
+
+| SFT epoch | train loss | eval loss |
+|---|---|---|
+| 1 | 0.40 | **0.442** |
+| 2 | 0.25 | 0.461 |
+| 3 | 0.07 | 0.596 |
+
+| DPO step (of 126) | mean loss | margin | acc |
+|---|---|---|---|
+| 0 | 0.693 | 0.00 | — |
+| 10 | 0.49 | 0.2–0.6 | 1.00 |
+| 20 | 0.13 | 1–3 | 1.00 |
+| 25 | 0.04 | 3.1 | 1.00 |
+| 105 | 0.0000 | 12–25 | 1.00 |
+
+### Sizing the DPO learning rate (Daniel's point, 2026-09-11)
+
+The v0.7 "5e-7 moved nothing" result cannot be used to rule out 5e-7: that DPO stage did train
+on the full pair set, but its `seqlogp` gathered token *t* against the logits at position *t*, so
+the objective was wrong regardless of rate. What we do have is one calibration point from this
+run: at 1e-5 (Adam, grad-norm clipped to 1.0, 6 warm-up steps) the ordering was fully learned by
+step 25, i.e. **lr × steps ≈ 2.5e-4 reaches saturation**. Adam's per-parameter step is ≈ lr, so
+progress scales with lr × steps, and the run should *end* near that budget, not run 4× past it.
+
+| rows | optimizer steps / epoch (bs 1 × accum 8) | lr for saturation at the end of 1 epoch |
+|---|---|---|
+| 500 | 63 | ~4e-6  → default 3e-6 |
+| 1000 | 125 | ~2e-6 |
+| 3000 | 375 | ~7e-7  → 5e-7 – 1e-6 is the right range here |
+
+So 5e-7 *is* a reasonable value for the full 3k set at one epoch, and far too low for 500 rows
+(one epoch would end at loss ≈ 0.6, nothing learned). Pass `--lr` per run size; the early stop
+covers the case where the rate is higher than needed.
+
+Conclusions: (1) SFT epochs, not the learning rate, caused the gap — the SFT rate was 2e-4 in v0.7
+too, it just never saw more than 7 rows. (2) DPO at 1e-5 learns the ordering in 25 steps and then
+over-optimises; the run was 80 % wasted and the final policy is 250 nats from the reference.
+(3) The `head -n 500` slice is balanced; the problem is not category coverage.
+
+Plan (Daniel): evaluate this model as the "overfit SFT + saturated DPO" data point, then retrain the
+same 500 rows with v0.8.1 defaults (`--stage merge --adapter runs/v1-sft-500/checkpoint-125` skips
+SFT). No more data enters the loop until a 500-row model shows something that more rows could
+improve.
+
+## 11. `dialectic_500` read-out and the tool-turn fix (2026-09-11)
+
+`eval_model.py compare` on 50 held-out rows: tuned median 32 words (max 62), coverage **.924**,
+fabrication 0, abstention **5/5**, hedges 0, empty 0, extra tool calls 0. The base column is invalid
+(31/50 empty, see §7 row). `probe_toolcalls.py`: base **5/5**, tuned **0/5** — the tuned model
+answers in text with no search and fabricates when nothing is in context. Unusable for Honcho's
+loop, whose first turn is the search.
+
+Why: the SFT loss covered the final assistant turn only. All 500 trajectories share one system
+prompt and end in text, so the model learned P(text | this prompt) ≈ 1 regardless of whether tool
+results are present; 3 epochs at 2e-4 and 250 nats of DPO drift cemented it. The v0.7 models passed
+the probe only because they had barely trained.
+
+Fix (v0.8.1, `train_dialectic.sft_targets`): every assistant `tool_calls` turn in the trajectory
+becomes an SFT sample with the trajectory up to that point as prefix — the model is trained to
+open with a search and to search again when the results so far are partial. Contexts carry 2–3
+searches, so a 500-row file yields ~500 answer + ~1250 tool-turn samples; tool-turn prefixes are
+shorter (fewer results) so the cost is under 3×. `--tool-turns first` (opening call only, 1:1 with
+answers) and `none` (v0.8.0) are available. The eval loss now includes tool turns, so it is not
+comparable with the .442 of the previous run.
+
+Retrain plan for the same 500 rows (SFT must be redone; `checkpoint-125` has no tool turns):
+```
+python3 train_dialectic.py --stage check --model <base> --data data/train500.sft.jsonl --max-seq 6144   # shows the tool-turn text
+python3 train_dialectic.py --stage sft --model <base> --data data/train500.sft.jsonl --eval-data data/eval50.sft.jsonl --out runs/v2-sft-500
+python3 probe_toolcalls.py --model <sft-only model in ollama>   # optional gate before DPO
+python3 train_dialectic.py --stage dpo --sft runs/v2-sft-500/merged --data data/train500.dpo.jsonl --out runs/v2-dpo-500
+python3 train_dialectic.py --stage export --model runs/v2-dpo-500/merged --out runs/v2-gguf-500
+python3 probe_toolcalls.py --model dialectic_500_v2 ; python3 eval_model.py ...
+```
+Gate order: probe first (≥ 90 % valid calls), then eval; watch `rows_with_extra_tool_calls` for the
+opposite failure (over-searching) now that search-again turns are trained.

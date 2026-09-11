@@ -245,6 +245,24 @@ back to this host → I fold `summary.json` + your blind-review picks into §3.2
   (quantisation, sampler, reasoning budget) is a mild distribution shift vs the Ollama deployment;
   keep one provider per dataset where possible and note the provider in the run log.
 
+- **2026-09-11 — first real 500-row run (v0.8.0): overfit SFT, saturated DPO (Claude review of
+  Daniel's logs).** SFT eval loss .442 / .461 / .596 over 3 epochs (train .40 → .07): the last,
+  worst checkpoint was merged. DPO at 1e-5 hit zero loss by step 25/126 and then drifted the margin
+  from 3 to 25. Category mix of the 500-row slice was fine. v0.8.1: SFT merges the best epoch by eval
+  loss (default 2 epochs), DPO 3e-6 × 1 epoch for 500 rows (rate scales with 1/steps: ~7e-7 at 3000 rows, so
+  Daniel's point that 5e-7 fits the full set stands; the v0.7 5e-7 result was confounded by the
+  off-by-one loss) with early stop on saturation and per-side log-ratio logging, `--stage merge` to reuse an earlier SFT checkpoint. Daniel's decision: evaluate this model,
+  retrain the same 500 rows with the new defaults, and bring in no more data until a 500-row model
+  shows a gap that more rows could plausibly widen. Details TRAIN.md §10.
+
+- **2026-09-11 — `dialectic_500` (v0.8.0) is unusable: it stopped calling tools.** Probe 0/5 vs base
+  5/5; without results in context it fabricates facts about the peer. The synthesis-turn eval looked
+  excellent (coverage .924, 0 fabrication, 5/5 abstention, median 32 words) precisely because eval
+  rows always contain the tool results. Root cause: SFT loss on the final turn only. v0.8.1 trains
+  every `tool_calls` turn of the trajectory as well (`--tool-turns all`, default). Gate order from
+  now on: `probe_toolcalls.py` ≥ 90 % first, eval second. Base eval column on node7 Ollama was
+  invalid (31/50 empty answers) — open item. Details TRAIN.md §11.
+
 ## 11. Trained model inventory (Daniel, 2026-09-09)
 
 | Ollama name | records trained | note |
@@ -253,6 +271,7 @@ back to this host → I fold `summary.json` + your blind-review picks into §3.2
 | `dialectic_2` | **2000** | names are NOT in record-count order |
 | `dialectic_3` | **1000** | |
 | `dialectic-qwen3.5-9b` | 25 | process-verification run |
+| `dialectic_500` | **500** (v0.8.0, 2026-09-11) | first run that actually learned the data; overfit SFT (3 ep) + saturated DPO (1e-5); synthesis eval coverage .924 / 0 fabrication / 5/5 abstention on 50 held-out rows, but **probe 0/5 — no tool calls, fabricates without context. Not deployable.** |
 
 Validation (2026-09-09): the three are behaviorally indistinguishable — head-to-head 10 wins/9 losses each across 152 common rows; all ~0.68–0.70 coverage vs base 0.663; all ~1.5× more terse than base; all serve 16k/32k context fine via `num_ctx` override (no retrain needed). Full write-up + open questions (why 500≈2000: method vs data-prep vs premise) in vault `active-projects/Honcho-Dialectic-Verbosity-Report.md` §11.
 
@@ -301,4 +320,6 @@ Validation (2026-09-09): the three are behaviorally indistinguishable — head-t
 2. `train_dialectic.py --stage check` on the emitted SFT file to pick `--max-seq`.
 3. Train ONE model (500 rows is enough for the first signal) with v0.8.0 defaults, run
    `verify_all.sh` against the base on the eval split. Only if that shows a clear gap, sweep sizes.
+   *2026-09-11:* first run done (overfit SFT + saturated DPO, TRAIN.md §10); evaluate it, then
+   retrain the same 500 rows with v0.8.1 defaults before any size sweep.
 4. Then the real gate: Phase D through Honcho's loop (§6).

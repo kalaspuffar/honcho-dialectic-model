@@ -160,8 +160,22 @@ n_train = sum(1 for l in enc["labels"] if l != -100)
 ok("train prep: labels cover answer + end marker only", n_train == 3, f"trainable={n_train}")  # 'April' '22.' '<|end|>'
 ok("train prep: prompt tokens masked", enc["labels"][0] == -100 and len(enc["labels"]) == len(enc["input_ids"]))
 ok("train prep: over-long rows dropped, not truncated", td.encode_example(FakeTok(), msgs, "April 22.", None, 5) is None)
-samples, dropped = td.prepare_sft([row], FakeTok(), 100000)
-ok("train prep: prepare_sft", len(samples) == 1 and dropped == 0)
+n_tool_turns = sum(1 for m in row["messages"] if m["role"] == "assistant" and m.get("tool_calls"))
+samples, dropped, kinds = td.prepare_sft([row], FakeTok(), 100000)
+ok("train prep: prepare_sft trains answer + every tool-call turn",
+   kinds == {"answer": 1, "tool": n_tool_turns} and len(samples) == 1 + n_tool_turns and dropped == 0 and n_tool_turns >= 1,
+   f"kinds={kinds} tool_turns={n_tool_turns}")
+tool_prefix, tool_target, kind = td.sft_targets(row)[0]
+ok("train prep: first target is the opening tool call with no results in the prefix",
+   kind == "tool" and tool_target.get("tool_calls") and all(m["role"] != "tool" for m in tool_prefix))
+tenc = td.encode_example(FakeTok(), tool_prefix, tool_target, trajectory.TOOL_SCHEMAS, 100000)
+t_train = [t for t, l in zip(tenc["input_ids"], tenc["labels"]) if l != -100]
+t_ids = FakeTok()("<tool_call> " + json.dumps(tool_target["tool_calls"][0]["function"]["arguments"], sort_keys=True).replace(" ", ""))["input_ids"]
+ok("train prep: tool-call turn labels cover the rendered call only", t_train[:len(t_ids)] == t_ids and len(t_train) == len(t_ids) + 1,
+   f"trainable={len(t_train)} expected={len(t_ids) + 1}")
+s_first, _, k_first = td.prepare_sft([row], FakeTok(), 100000, tool_turns="first")
+s_none, _, k_none = td.prepare_sft([row], FakeTok(), 100000, tool_turns="none")
+ok("train prep: --tool-turns first/none", k_first == {"answer": 1, "tool": 1} and k_none == {"answer": 1, "tool": 0} and len(s_none) == 1)
 pairs, dropped = td.prepare_dpo([build_dataset.dpo_row(kept[0])], FakeTok(), 100000)
 ok("train prep: prepare_dpo shares the prefix", pairs and pairs[0][0]["input_ids"][:10] == pairs[0][1]["input_ids"][:10])
 batch = td.pad_collator(0)([samples[0], {k: v[:5] for k, v in samples[0].items()}])
@@ -169,7 +183,10 @@ lab = batch["labels"]
 lab = lab.tolist() if hasattr(lab, "tolist") else lab
 ok("train prep: collator pads labels with -100", lab[1][-1] == -100 and len(lab[0]) == len(lab[1]))
 ok("train: no hardcoded smoke split", "samples[:7]" not in defs["train_dialectic.py"])
-ok("train: DPO lr is LoRA-scale", td.DPO_DEFAULTS["lr"] >= 5e-6)
+# 1e-5 (v0.8.0) saturated the 500-row run by step 25/126; the right value scales with 1/steps (TRAIN.md §10).
+ok("train: DPO lr in a plausible range", 3e-7 <= td.DPO_DEFAULTS["lr"] <= 2e-5)
+ok("train: DPO stops on saturation by default", td.DPO_STOP["loss"] > 0 and td.DPO_STOP["patience"] > 0)
+ok("train: SFT merges the best eval epoch", "load_best_model_at_end=bool(eval_s)" in defs["train_dialectic.py"])
 
 # ------------------------------------------------------------------ 4. e2e
 if "--quick" not in sys.argv:
@@ -240,8 +257,9 @@ if "--quick" not in sys.argv:
         r = sh([sys.executable, "eval_model.py", "compare", f"{tmp}/eval_mock.jsonl", f"{tmp}/eval_mock.jsonl"])
         ok("eval_model compare", r.returncode == 0 and "median_words" in r.stdout)
         # train prep on the real emitted rows with the fake tokenizer
-        samples, dropped = td.prepare_sft(sft, FakeTok(), 100000)
-        ok("train prep on emitted sft rows", len(samples) == len(sft) and dropped == 0)
+        samples, dropped, kinds = td.prepare_sft(sft, FakeTok(), 100000)
+        ok("train prep on emitted sft rows", kinds["answer"] == len(sft) and kinds["tool"] >= len(sft) and dropped == 0,
+           f"kinds={kinds} rows={len(sft)}")
     finally:
         for p in procs:
             p.terminate()

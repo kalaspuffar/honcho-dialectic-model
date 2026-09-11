@@ -16,7 +16,7 @@ Plan, decisions and status live in [PLAN.md](PLAN.md); the training runbook and 
 | `gen_rejected.py` | **stage 2** — the base model (Ollama, or the same weights on OpenRouter) answers each scenario on the real Honcho trajectory → *rejected* |
 | `gen_chosen.py` | **stage 3** — the teacher writes the ideal terse answer → *chosen* (any OpenRouter/Anthropic model) |
 | `build_dataset.py` | **stage 4** — join, filter, persona split, emit SFT + DPO JSONL |
-| `train_dialectic.py` | **stage 5** — `check` / `strip` / `sft` / `dpo` / `export` (GPU host, Unsloth venv) |
+| `train_dialectic.py` | **stage 5** — `check` / `strip` / `sft` / `merge` / `dpo` / `export` (GPU host, Unsloth venv) |
 | `eval_model.py` | score any Ollama model on held-out scenarios; `compare` two runs |
 | `probe_toolcalls.py` | confirm the tuned model still emits valid tool calls |
 | `verify_all.sh` | post-training A/B: probe + baseline vs tuned on the eval split |
@@ -106,11 +106,26 @@ python3 train_dialectic.py --stage sft --model Qwen/Qwen3-8B --data data/dataset
 python3 train_dialectic.py --stage dpo --sft runs/v1-sft/merged --data data/dataset_train.dpo.jsonl --out runs/v1-dpo
 python3 train_dialectic.py --stage export --model runs/v1-dpo/merged --out runs/v1-gguf
 # edit Modelfile FROM -> runs/v1-gguf/*.gguf, then:  ollama create dialectic-v1 -f Modelfile
+
+# start DPO from a different SFT epoch than the one that got merged (checkpoints are kept per epoch):
+python3 train_dialectic.py --stage merge --adapter runs/v1-sft/checkpoint-125 --out runs/v1-sft-ep1
+python3 train_dialectic.py --stage dpo --sft runs/v1-sft-ep1/merged --data data/dataset_train.dpo.jsonl --out runs/v1-dpo-ep1
 ```
 
 * 12 GB card: defaults (`--load-bits 4 --max-seq 6144`). 48 GB A6000: `--load-bits 16 --max-seq 8192`.
 * Rows longer than `--max-seq` are **dropped, never truncated** (`check` tells you how many).
-* Defaults: SFT 3 epochs at 2e-4; DPO 2 epochs at 1e-5, β 0.1, summed log-probs. Adapters merge to 16-bit.
+* **SFT trains the tool-call turns too** (`--tool-turns all`, default). Each trajectory yields one sample per
+  `search_*` call (prefix so far → the call) plus the final answer, so the model learns to search when it has a
+  question and no results. v0.8.0 trained the answer turn only and the 500-row model stopped calling tools
+  (`probe_toolcalls.py` 0/5 vs 5/5 for the base) and fabricated instead. Expect ~3× the SFT samples per epoch;
+  `--tool-turns first` trains only the opening call, `none` is the old behaviour. Watch
+  `rows_with_extra_tool_calls` in the eval for over-searching.
+* Defaults (v0.8.1): SFT 2 epochs at 2e-4, and with `--eval-data` the epoch with the **lowest eval loss** is the
+  one merged (the 500-row run went .442 → .461 → .596 over 3 epochs). DPO 1 epoch at 3e-6, β 0.1, summed
+  log-probs, and it **stops early** once the loss has stayed under `--dpo-stop-loss` (0.01) for
+  `--dpo-stop-patience` (10) steps — past that point the margin only drifts. The step log shows `d_chosen` /
+  `d_rejected` (log-ratio vs the reference per side): `d_chosen` going negative while the margin grows means
+  the model is only pushing the verbose answer down, not the terse one up. Adapters merge to 16-bit.
 * For the real Qwen3.5 9B text backbone run `--stage strip --model Qwen/Qwen3.5-9B --out /path/qwen35-9b-text` first
   and pass that directory as `--model`.
 
