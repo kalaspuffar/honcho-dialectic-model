@@ -305,7 +305,7 @@ refusal, rejected = refusal + context-disclosure), not a capability problem.
   plumbing tests only).
 - Before training: `python3 train_dialectic.py --stage check --model <base> --data <sft.jsonl> --max-seq 6144`.
   Trajectory rows run ~4–5k tokens (system prompt ~3k). Raise `--max-seq` rather than accept drops.
-- Qwen3's chat template renders the final assistant turn with an empty `<think>` block, so the
+- Qwen3's chat template renders the final assistant turn with an empty `<think>` block, so the (Qwen3.5: same empty block, but tool calls render in XML form — §12)
   model is trained to answer without thinking; tool calls / tool results render as
   `<tool_call>` / `<tool_response>`, the same text Ollama's Qwen3 template produces at runtime.
 - First real experiment: one model on ~500 rows with defaults, `verify_all.sh` against the base on the
@@ -399,3 +399,15 @@ the Qwen3.5 one (copied from the VL repo by `--stage strip`), not Qwen3's that �
 two `trainable text` lines it prints: the tool-call turn must be exactly one `<tool_call>{...}</tool_call>`
 block (plus the turn's end token) and the answer turn must be the terse answer, optionally preceded by
 an empty think block — nothing from the prompt, no tool results. `dropped` should be 0 at 8192.
+
+## 12. v2 500-row run on the stripped Qwen3.5-9B (2026-09-11)
+
+Base `/data/smoke/qwen35-9b-text` (§0b). `--stage check` on `data/dataset_500_train.sft.jsonl`
+at `--max-seq 8192`: 500 answer turns + 1428 tool-call turns, kept 1928, **dropped 0**; tokens
+min 3283 / median 3838 / p95 4710 / max 5618. Trainable spans as expected — both begin with
+`\n\n</think>\n\n` (empty think block closed, then the turn) and end at `<|im_end|>`; nothing from
+the prompt or tool results is in the loss. Qwen3.5's template renders tool calls in its XML form
+(`<tool_call>\n<function=search_memory>\n<parameter=query>…</parameter>…</function>\n</tool_call>`),
+not the JSON block §9 describes for Qwen3; Ollama's Qwen3.5 template parses the same form.
+Tool turns are ~74 % of SFT samples; fall back to `--tool-turns first` (1:1) only if the answer
+turns look under-trained after SFT. Read-out (SFT/DPO tables, probe, eval) to follow.
