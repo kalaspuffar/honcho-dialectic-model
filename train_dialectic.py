@@ -229,7 +229,7 @@ def run_check(base, data, max_seq, tool_turns="all"):
     else:
         samples, dropped, kinds = prepare_sft(rows, tok, max_seq, tool_turns)
         lens = [len(s["input_ids"]) for s in samples]
-        ex = samples[-1] if samples else None            # the last sample of a row is its answer turn
+        ex = samples[-1] if samples else None            # the final sample is the last row's answer turn
         kept = len(samples)
         print(f"[check] sft samples: {kinds['answer']} answer turns + {kinds['tool']} tool-call turns (--tool-turns {tool_turns})")
         tool_targets = [t for t in sft_targets(rows[0], tool_turns) if t[2] == "tool"]
@@ -244,7 +244,7 @@ def run_check(base, data, max_seq, tool_turns="all"):
         print(f"[check] tokens/sequence: min {lens[0]}  median {lens[len(lens)//2]}  p95 {lens[int(len(lens)*0.95)]}  max {lens[-1]}")
     if ex:
         tail = [t for t, l in zip(ex["input_ids"], ex["labels"]) if l != -100]
-        print(f"[check] answer turn of first row, trainable tokens: {len(tail)} of {len(ex['input_ids'])}")
+        print(f"[check] answer turn of last row, trainable tokens: {len(tail)} of {len(ex['input_ids'])}")
         print("[check] trainable text:", repr(tok.decode(tail)))
 
 
