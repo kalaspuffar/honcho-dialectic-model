@@ -274,6 +274,7 @@ back to this host → I fold `summary.json` + your blind-review picks into §3.2
 | `dialectic_500` | **500** (v0.8.0, 2026-09-11) | first run that actually learned the data; overfit SFT (3 ep) + saturated DPO (1e-5); synthesis eval coverage .924 / 0 fabrication / 5/5 abstention on 50 held-out rows, but **probe 0/5 — no tool calls, fabricates without context. Not deployable.** |
 | `dialectic_500b` | **500** (v0.8.1, stripped Qwen3.5-9B, 2026-09-11/12) | tool turns trained: probe 5/5, DPO calibrated; but answers land in Ollama's `reasoning` field on 302/302 rows (model never emits `</think>` after the served `<think>\n`; TRAIN.md §12). `reasoning_effort: none` is not honoured by Ollama 0.32.12. **Not deployable via /v1.** |
 | `dialectic_s50` | **50** (v0.8.2 encoding, 2 SFT epochs, DPO effectively none, 2026-09-12) | **first deployable model.** 302 held-out rows: median 25 words (base 122), coverage .923 (base .876), fabrication 0, abstention 29/32 (base 3/32), hedges 2, empty 0, over-search 43 (base 80); probe 5/5. **Honcho harness (§7, 5 questions) at `low`: median 42 words, 4–11 s** vs base 328 words, 13–44 s. Daniel prefers its wording. |
+| `dialectic_s50_sft` / `dialectic_s150_sft` | 50 / 150, SFT only (2026-09-12) | identical to s50 / s150 on all 302-row metrics (coverage .924 / .919, abstention 29/32 / 32/32, hedges 3 / 0, over-search 43 / 43). **DPO ablation: no measurable effect at this scale.** |
 | `dialectic_s150` | **150** (same recipe + DPO 19 steps @ 1e-5, 2026-09-12) | 302 rows: median 23 words, coverage .912, fabrication 0, **abstention 32/32, hedges 0**, over-search 43; probe 5/5. Honcho `low`: median 37 words, ~4 s. Statistically the same as s50 on the eval; Daniel finds its wording drier ("choice of words, not accuracy"). Open: whether DPO caused the style shift (its SFT-only merge `runs/s150-sft/merged` is not yet evaluated). |
 
 Validation (2026-09-09): the three are behaviorally indistinguishable — head-to-head 10 wins/9 losses each across 152 common rows; all ~0.68–0.70 coverage vs base 0.663; all ~1.5× more terse than base; all serve 16k/32k context fine via `num_ctx` override (no retrain needed). Full write-up + open questions (why 500≈2000: method vs data-prep vs premise) in vault `active-projects/Honcho-Dialectic-Verbosity-Report.md` §11.
@@ -353,3 +354,8 @@ Validation (2026-09-09): the three are behaviorally indistinguishable — head-t
   .912, abstention 29 → 32 of 32, over-search 43 → 43) and Daniel prefers the 50-row wording; no
   500-row or larger run is scheduled. Remaining questions are style (does DPO dry the wording? test:
   evaluate `runs/s150-sft/merged`) and the hard-question gate at `high` before the all-level swap.
+- **2026-09-12 (late)** DPO ablation (TRAIN.md §12): SFT-only merges of s50 and s150 match the
+  DPO'd models on every metric. §3.1's "DPO with SFT warm-up" becomes **SFT only** for the shipped
+  recipe; DPO stays available for a later run with a target it can be shown to move. Size: 50 and
+  150 are equivalent on accuracy; 150 is stricter (32/32 abstention, 0 hedges), 50 wordier in a way
+  Daniel prefers. Both deployable.

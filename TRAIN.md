@@ -667,3 +667,36 @@ Decisions: size curve closed at 150 (nothing measurable moved from 50). Two chea
 s150 on the same Honcho questions; if the SFT-only model reads like s50, DPO is what dried the
 wording and can be dropped or softened (lower β / fewer steps), saving the DPO hours in every
 future run; (2) the hard-question gate at `high` (PLAN §7) before the all-level swap.
+
+### 2026-09-12 — DPO ablation: SFT-only merges of s50 and s150
+
+| 302 rows | s50 | s50_sft | s150 | s150_sft |
+|---|---|---|---|---|
+| median / max words | 25 / 92 | 25 / 96 | 23 / 63 | 23 / 64 |
+| coverage | .923 | .924 | .912 | .919 |
+| abstention | 29/32 | 29/32 | 32/32 | 32/32 |
+| hedges | 2 | 3 | 0 | 0 |
+| over-search rows | 43 | 43 | 43 | 43 |
+| probe | 5/5 | 5/5 | 5/5 | 5/5 |
+
+s150's DPO (19 steps @ 1e-5, no early stop; end loss 0.29–0.50, margin 0.4–1.1, acc 1.0, d_chosen ≈ 0,
+d_rejected −4…−11) trained as the §10 rule predicted — the ordering was learned by the end of the
+epoch, not over-optimised — and **changed nothing measurable**: s150 ≡ s150_sft on every metric, as
+s50 ≡ s50_sft (where DPO was a no-op). DPO moved the rejected answers' log-prob down and left the
+chosen ones where SFT put them, which at temperature 0.1 leaves the argmax output unchanged.
+Everything that differs between 50 and 150 rows (abstention 29 → 32, hedges 2–3 → 0, the drier
+wording Daniel noticed) is an **SFT data-size effect**, present in both variants.
+
+Honcho harness, `low` median: s50_sft 37 w, s150_sft 50 w (s50 42, s150 37) — run-to-run spread at
+one model is as large as the spread between models; the harness separates base from tuned, not
+tuned from tuned. One s150_sft answer at `max` was 8 words (Shuffle workflow) — check it is not a
+truncation.
+
+Recipe decision: **SFT only** (2 epochs, `--tool-turns all`, separate-tokenization encoding) is the
+production recipe at this scale; the DPO stage stays in the script as an option for a later, larger
+run with a measurable target. The invariant "rejected comes from the base model" still holds for
+whatever DPO run comes next.
+
+Open oddity: over-search is exactly 43 rows for all four models. Either the same 43 contexts trigger
+a search-again turn structurally (e.g. a context with a single, fallback search where the training
+trajectories have 2–3), or it is a coincidence — check id overlap and the contexts' search count.
