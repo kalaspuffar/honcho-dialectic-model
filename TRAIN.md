@@ -570,3 +570,46 @@ available on this host and `dialectic_500b` stays undeployable; `dialectic_s50` 
 Open: n=50 for the tuned column; over-searching 16 % is the one number to watch as rows grow
 (search-again turns are trained); whether the smoke included the DPO step (6 steps) is immaterial
 to the pass. The base column is still measured at temperature 0.1, not its Modelfile default.
+
+### 2026-09-12 11:30 — `dialectic_s50` on all 302 held-out rows, and the size schedule
+
+| | qwen3.5:9b | dialectic_s50 (50 rows) |
+|---|---|---|
+| median / max words | 122 / 641 | **25 / 92** |
+| coverage | .876 | **.910** |
+| fabrication | 1 | 0 |
+| abstention correct | 3/32 | **25/32** |
+| hedges | 44 | 2 |
+| empty / in-thinking | 3 / 160 | 0 / 0 |
+| over-searching rows | 80 (26 %) | 43 (14 %) |
+
+Note: at 50 rows the DPO stage was 6 steps × 3e-6 = lr·steps 1.8e-5, ~7 % of the 2.5e-4 saturation
+budget (§10) — `dialectic_s50` is effectively **SFT-only**. Terseness, grounding and tool use come
+from SFT alone; DPO's contribution is still unmeasured.
+
+**Size schedule (Daniel's question: stop as early as possible, still get a good model).** Fine-tune
+gains are ~log-linear in rows, so linear steps (500 → 1000) buy little information per hour; use
+×3 steps, nested `head -n` prefixes (the category mix is interleaved, every prefix is balanced, and
+each run contains the previous one), always the full 302-row eval, and stop when a step fails to
+move the two open metrics beyond eval noise. Noise on 302 rows: coverage ≈ ±.02, abstention (32
+rows) ≈ ±3 rows, over-search (302) ≈ ±10 rows — call a step a gain only if abstention ≥ +4 rows or
+over-search ≤ −15 rows or coverage ≥ +.03.
+
+Timing from the measured runs (24 s/SFT step of 4 samples, ~3.9 samples/row → 23 s/row/epoch;
+DPO 142 s/step of 8 pairs → 18 s/pair/epoch; eval 50 min):
+
+| rows | SFT epochs | SFT | DPO steps → lr (lr·steps ≈ 2.5e-4) | DPO | total |
+|---|---|---|---|---|---|
+| 50 | 2 | 0.7 h | 6 → (3e-6, no-op) | 0.25 h | 1 h  ✔ done |
+| 150 | 2 | 1.9 h | 19 → **1e-5** | 0.8 h | 2.7 h |
+| 500 | 2 | 6.4 h | 63 → **4e-6** | 2.5 h | 9 h  (1 epoch: 5.7 h) |
+| 1500 | 1 | 9.6 h | 188 → **1.3e-6** | 7.4 h | 17 h |
+| 3000 | 1 | 19 h | 375 → **7e-7** | 15 h | 34 h |
+
+Rules: (1) 150 next — it is the first run where DPO actually trains, so it also answers "does DPO add
+anything over SFT"; (2) 500 only if 150 beats 50 by the noise rule; 1500 only if 500 beats 150; (3)
+2 SFT epochs up to 500 (comparable with s50; the 500-row run's eval loss was flat .155 → .152 so
+epoch 2 is cheap insurance, not a gain), 1 epoch above — note the confound when comparing 1500 to 500;
+(4) before 500, read the 7 missed abstention rows and the 43 over-search rows of s50: if the misses
+are one category or one phrasing, data *composition* (more abstention/contradiction pairs) is the
+cheaper lever than size.
