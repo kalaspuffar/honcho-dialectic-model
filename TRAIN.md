@@ -624,3 +624,18 @@ this form) → still counted as misses on purpose. Corrected s50 abstention: **2
 widened regex also lets more teacher abstention answers through `build_dataset`'s filter when the
 dataset is next rebuilt. `eval_model.py rescore <results.jsonl> --contexts …` re-reads an existing
 results file under the current scorer so old columns stay comparable (summary gets `rescored: true`).
+
+### 2026-09-12 12:30 — rescored columns; over-search is latency only; schedule revised
+
+Rescored (scorer 51c4b1d): base unchanged (3/32), **s50 coverage .923, abstention 29/32**.
+Over-search rows (43): coverage .914 vs .925 for the other 259, same median words (25). Rate by
+category: supersession 7/24 (29 %), contradiction 5/23 (22 %), summary 6/38, abstention 5/32,
+enumeration 11/75, preference 6/41 (15–16 %), factual 3/69 (4 %). The model re-searches to confirm
+a changed or conflicting value — the trajectories it was trained on do the same — at the cost of one
+empty tool round. Not a training target on its own.
+
+Schedule revision: at 50 rows this eval is near its ceiling (3 abstention rows of headroom, so the
+"+4 rows" rule is unreachable). A size step now counts as a gain only if coverage ≥ .95 or
+over-search ≤ 28 rows. Run 150 anyway (2.7 h): it is the first run where DPO actually trains and
+answers whether DPO adds anything over SFT. Do **not** schedule 500+ on these numbers; the decision
+comes from the Honcho harness A/B (PLAN §1 questions + the hard set) and whatever it exposes.
