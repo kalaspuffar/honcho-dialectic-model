@@ -120,6 +120,15 @@ abst = {**ctx, "category": "abstention", "required_facts": []}
 ok("scoring: clean refusal naming topic passes", scoring.score_answer(abst, "There is no information about a four-day workweek in memory.")["abst"])
 ok("scoring: hedged refusal fails", not scoring.score_answer(abst, "There is probably no information about that.")["abst"])
 ok("scoring: long refusal fails", not scoring.score_answer(abst, "I have no information about that. " + "word " * 70)["abst"])
+for _a in ("No — memory only has her considering training for a half-marathon, not completing a full marathon.",
+           "Memory holds that Chloe bought Montessori toys in November 2025, but it doesn't say she uses Montessori methods.",
+           "Sofia has only mentioned visiting a friend in a high-rise, and she disliked the noise.",
+           "No — Chloe herself has no known pet allergies. Her son Liam is allergic to cats."):
+    ok("scoring: memory-limit phrasing counts as abstention: " + _a[:40], scoring.score_answer(abst, _a)["abst"])
+for _a in ("No — Chloe owns a Centrifuge 3000, not a Centrifuge 5000.",
+           "No — she tried a Peloton bike at a friend's house but found it too expensive.",
+           "Yes, she uses a Thermo Fisher centrifuge."):
+    ok("scoring: inferred negative / assertion is NOT an abstention: " + _a[:40], not scoring.score_answer(abst, _a)["abst"])
 
 kept, dropped = build_dataset.filter_rows(
     [ctx, {**ctx, "id": "c2", "question": "Other?"}, {**ctx, "id": "c3"}],
@@ -288,6 +297,8 @@ if "--quick" not in sys.argv:
         ok("eval_model run", r.returncode == 0 and os.path.exists(f"{tmp}/eval_mock.summary.json"), r.stderr[-300:])
         r = sh([sys.executable, "eval_model.py", "compare", f"{tmp}/eval_mock.jsonl", f"{tmp}/eval_mock.jsonl"])
         ok("eval_model compare", r.returncode == 0 and "median_words" in r.stdout)
+        r = sh([sys.executable, "eval_model.py", "rescore", f"{tmp}/eval_mock.jsonl", "--contexts", ctxf])
+        ok("eval_model rescore", r.returncode == 0 and json.load(open(f"{tmp}/eval_mock.summary.json")).get("rescored") is True, r.stderr[-300:])
         # baseline shape: answer inside <think>, empty content -> counted, and scored from reasoning only when asked
         r = sh([sys.executable, "eval_model.py", "--contexts", ctxf, "--ids-from", f"{tmp}/ds_eval.dpo.jsonl", "--model", "thinker",
                 "--base", f"http://127.0.0.1:{p_or}/v1", "--out", f"{tmp}/eval_think.jsonl"])

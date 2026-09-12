@@ -613,3 +613,14 @@ epoch 2 is cheap insurance, not a gain), 1 epoch above — note the confound whe
 (4) before 500, read the 7 missed abstention rows and the 43 over-search rows of s50: if the misses
 are one category or one phrasing, data *composition* (more abstention/contradiction pairs) is the
 cheaper lever than size.
+
+### 2026-09-12 12:00 — the 7 "missed" abstentions, scorer widened
+
+All 7 rows s50 "missed" answer a false-premise question with a grounded negative and nothing
+fabricated. Four state memory's limits in words the REFUSAL regex did not know ("memory only has…",
+"it doesn't say…", "has only mentioned…", "no known…") → added to `scoring.REFUSAL` with unit checks.
+Three are flat "No — she uses X, not Y" (a negative inferred from absence; the teacher data avoids
+this form) → still counted as misses on purpose. Corrected s50 abstention: **29/32**. Note the
+widened regex also lets more teacher abstention answers through `build_dataset`'s filter when the
+dataset is next rebuilt. `eval_model.py rescore <results.jsonl> --contexts …` re-reads an existing
+results file under the current scorer so old columns stay comparable (summary gets `rescored: true`).

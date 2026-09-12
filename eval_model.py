@@ -72,6 +72,29 @@ def run(a):
     print("\nAGGREGATE\n" + json.dumps(agg, indent=2))
 
 
+def rescore(a):
+    """Re-score an existing results jsonl with the current scoring.py and rewrite its summary
+    (scorer changes must not require re-running the model)."""
+    ctxs = {c["id"]: c for c in be.read_jsonl(a.contexts)}
+    rows = be.read_jsonl(a.file)
+    out, scores, used = [], [], []
+    for r in rows:
+        c = ctxs.get(r["id"])
+        if c is None:
+            sys.exit(f"{r['id']} not in {a.contexts}")
+        s = scoring.score_answer(c, r["answer"])
+        r = {**r, **s}
+        out.append(r); used.append(c); scores.append({k: r[k] for k in ("words", "coverage", "fab", "abst", "hedge")})
+    agg = scoring.aggregate(used, scores)
+    old = json.load(open(os.path.splitext(a.file)[0] + ".summary.json")) if os.path.exists(os.path.splitext(a.file)[0] + ".summary.json") else {}
+    agg.update({k: v for k, v in old.items() if k not in agg})
+    agg["rescored"] = True
+    be.write_jsonl(a.file, out)
+    with open(os.path.splitext(a.file)[0] + ".summary.json", "w") as f:
+        json.dump(agg, f, indent=2)
+    print(json.dumps(agg, indent=2))
+
+
 def compare(a):
     tables = []
     for p in a.files:
@@ -80,7 +103,7 @@ def compare(a):
             tables.append(json.load(open(sp)))
         else:
             sys.exit(f"missing {sp} (produced by a run)")
-    keys = ["model", "reasoning_effort", "n", "median_words", "mean_words", "max_words", "mean_coverage",
+    keys = ["model", "reasoning_effort", "rescored", "n", "median_words", "mean_words", "max_words", "mean_coverage",
             "fabrication_rows", "abstention_correct", "hedge_rows", "empty_rows", "answered_in_thinking_rows",
             "scored_from_reasoning", "forced_rows", "rows_with_extra_tool_calls"]
     w = max(len(k) for k in keys)
@@ -112,8 +135,12 @@ def main():
                         "reports answered_in_thinking_rows)")
     p = sub.add_parser("compare"); p.set_defaults(fn=compare)
     p.add_argument("files", nargs="+")
+    p = sub.add_parser("rescore", help="re-score a results jsonl with the current scoring.py (rewrites it + its summary)")
+    p.set_defaults(fn=rescore)
+    p.add_argument("file")
+    p.add_argument("--contexts", required=True)
     argv = sys.argv[1:]
-    if argv and argv[0] not in ("run", "compare", "-h", "--help"):
+    if argv and argv[0] not in ("run", "compare", "rescore", "-h", "--help"):
         argv = ["run"] + argv          # `eval_model.py --contexts ...` == `eval_model.py run ...`
     a = ap.parse_args(argv)
     if not getattr(a, "fn", None):

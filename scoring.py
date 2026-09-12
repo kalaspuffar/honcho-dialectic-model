@@ -18,7 +18,14 @@ REFUSAL = re.compile(
     r"not stored|no (note|notes|record|records|entry|data|evidence|conclusions?|mention)|no way to (know|tell|verify)|"
     r"i can'?t (confirm|verify|say|be sure|see|find)|i (have no |don'?t have |do not have |found no |couldn'?t find |could not find )|"
     r"we don'?t (have|know)|no record|isn'?t (anything|any information)|is not (recorded|stored|in memory)|"
-    r"not (captured|present|available) in", re.I)
+    r"not (captured|present|available) in|"
+    # memory-limit phrasings the tuned model uses for false-premise questions (2026-09-12, s50 eval):
+    # "memory only has her considering…", "it doesn't say she uses…", "has only mentioned visiting…",
+    # "no known pet allergies". A bare "No — she uses X, not Y" (a negative inferred from absence)
+    # is deliberately NOT a refusal.
+    r"\b(memory|the notes?|the records?|it) only (has|holds|shows?|mentions?|contains?|records?)\b|"
+    r"\b(doesn'?t|does not|don'?t|do not|never|didn'?t|did not) (say|mention|state|record|indicate|show|note)\b|"
+    r"\bhas only (mentioned|said|noted|talked about|referred to)\b|\bno known\b", re.I)
 
 ABSTENTION_MAX_WORDS = 60
 
