@@ -78,7 +78,7 @@ Invariants that span files:
   eval all go through it. Findings never go into the system prompt. Parity points with Honcho:
   `honcho_prompt.py` (verbatim copy, never hand-edit), `trajectory.TOOL_SCHEMAS`,
   `trajectory.format_tool_result`. If Honcho changes any of them, re-copy and regenerate all data.
-- **One scorer.** `scoring.py` owns `HEDGE`, `REFUSAL`, `score_answer`, `aggregate`.
+- **One scorer.** `scoring.py` owns `HEDGE`, `REFUSAL`, `NARRATION`, `score_answer`, `aggregate`.
   `verify_pipeline.py` fails if those regexes are defined anywhere else.
 - **One backend.** `llm_backend.py` owns the model/price table (`MODELS`), key loading, OpenRouter
   concurrency with retries, Anthropic sync + Message Batches, manifests, and resume-safe JSONL

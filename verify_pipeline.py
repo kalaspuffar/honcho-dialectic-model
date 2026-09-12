@@ -67,6 +67,8 @@ hedge_defs = [f for f, s in defs.items() if re.search(r"^HEDGE\s*=", s, re.M)]
 ok("HEDGE regex defined only in scoring.py", hedge_defs == ["scoring.py"], str(hedge_defs))
 ref_defs = [f for f, s in defs.items() if re.search(r"^REFUSAL\s*=", s, re.M)]
 ok("REFUSAL regex defined only in scoring.py", ref_defs == ["scoring.py"], str(ref_defs))
+nar_defs = [f for f, s in defs.items() if re.search(r"^NARRATION\s*=", s, re.M)]
+ok("NARRATION regex defined only in scoring.py", nar_defs == ["scoring.py"], str(nar_defs))
 sp_users = [f for f, s in defs.items() if "agent_system_prompt(" in s and f not in ("honcho_prompt.py", "verify_pipeline.py")]
 ok("agent_system_prompt used only via trajectory.py (+probe)", set(sp_users) <= {"trajectory.py", "probe_toolcalls.py"}, str(sp_users))
 
@@ -120,6 +122,10 @@ abst = {**ctx, "category": "abstention", "required_facts": []}
 ok("scoring: clean refusal naming topic passes", scoring.score_answer(abst, "There is no information about a four-day workweek in memory.")["abst"])
 ok("scoring: hedged refusal fails", not scoring.score_answer(abst, "There is probably no information about that.")["abst"])
 ok("scoring: long refusal fails", not scoring.score_answer(abst, "I have no information about that. " + "word " * 70)["abst"])
+_n = scoring.score_answer(ctx, "Search for Shuffle production workflow and Obsidian workflow.")
+ok("scoring: search narration is a failed row", _n["narration"] and _n["coverage"] == 0.0 and not _n["req_ok"])
+ok("scoring: real answer is not narration", not scoring.score_answer(ctx, "April 22, moved from April 25.")["narration"])
+ok("scoring: aggregate counts narration_rows", scoring.aggregate([ctx, ctx], [_n, scoring.score_answer(ctx, "April 22.")])["narration_rows"] == 1)
 for _a in ("No — memory only has her considering training for a half-marathon, not completing a full marathon.",
            "Memory holds that Chloe bought Montessori toys in November 2025, but it doesn't say she uses Montessori methods.",
            "Sofia has only mentioned visiting a friend in a high-rise, and she disliked the noise.",

@@ -700,3 +700,16 @@ whatever DPO run comes next.
 Open oddity: over-search is exactly 43 rows for all four models. Either the same 43 contexts trigger
 a search-again turn structurally (e.g. a context with a single, fallback search where the training
 trajectories have 2–3), or it is a coincidence — check id overlap and the contexts' search count.
+
+### 2026-09-12 — over-search overlap, and a narration leak
+
+Over-search: every eval context has exactly 2 searches, so a single-search artifact is ruled out; the
+"common 8" was the 50-row smoke run in the glob, not a real intersection. Left as a behaviour to
+watch, not a bug.
+
+Narration leak: s150_sft at `max` answered the Shuffle-workflow question with
+`"Search for Shuffle production workflow and Obsidian workflow."` — a search plan in prose instead
+of a tool call, shown to the user as the answer (1 of 75 tuned harness answers). The harness scored
+it ok because it was non-empty. `scoring.NARRATION` now marks such rows failed (coverage 0); the eval
+summary and `honcho_harness.py` report `narration_rows` / `narration`. Re-score old result files with
+`eval_model.py rescore` to see whether the 302-row evals contain any.

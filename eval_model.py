@@ -55,7 +55,7 @@ def run(a):
     rows, scores, used = [], [], []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, a.concurrency)) as ex:
         for i, (c, row) in enumerate(ex.map(one, ctxs), 1):
-            rows.append(row); scores.append({k: row[k] for k in ("words", "coverage", "fab", "abst", "hedge")}); used.append(c)
+            rows.append(row); scores.append({k: row.get(k) for k in ("words", "coverage", "fab", "abst", "hedge", "narration")}); used.append(c)
             print(f"[{i:3}/{len(ctxs)}] {c['id']} [{c.get('category', ''):13}] {row['words']:4}w cov={row['coverage']:.2f} "
                   f"fab={row['fab']} abst={row['abst']} hedge={row['hedge']} extra_calls={row['extra_calls']}", file=sys.stderr)
     agg = scoring.aggregate(used, scores)
@@ -84,7 +84,7 @@ def rescore(a):
             sys.exit(f"{r['id']} not in {a.contexts}")
         s = scoring.score_answer(c, r["answer"])
         r = {**r, **s}
-        out.append(r); used.append(c); scores.append({k: r[k] for k in ("words", "coverage", "fab", "abst", "hedge")})
+        out.append(r); used.append(c); scores.append({k: r.get(k) for k in ("words", "coverage", "fab", "abst", "hedge", "narration")})
     agg = scoring.aggregate(used, scores)
     old = json.load(open(os.path.splitext(a.file)[0] + ".summary.json")) if os.path.exists(os.path.splitext(a.file)[0] + ".summary.json") else {}
     agg.update({k: v for k, v in old.items() if k not in agg})
@@ -104,7 +104,7 @@ def compare(a):
         else:
             sys.exit(f"missing {sp} (produced by a run)")
     keys = ["model", "reasoning_effort", "rescored", "n", "median_words", "mean_words", "max_words", "mean_coverage",
-            "fabrication_rows", "abstention_correct", "hedge_rows", "empty_rows", "answered_in_thinking_rows",
+            "fabrication_rows", "abstention_correct", "hedge_rows", "empty_rows", "narration_rows", "answered_in_thinking_rows",
             "scored_from_reasoning", "forced_rows", "rows_with_extra_tool_calls"]
     w = max(len(k) for k in keys)
     print(" " * w + "  " + "  ".join(f"{str(t.get('model', '?')):>18}" for t in tables))

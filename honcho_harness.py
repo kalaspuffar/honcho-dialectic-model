@@ -54,8 +54,11 @@ def score(q, answer):
     hedge = bool(scoring.HEDGE.search(answer))
     refusal = bool(scoring.REFUSAL.search(answer))
     exp = [e for e in (q.get("expect") or []) if e]
-    row = {"words": w, "hedge": hedge, "refusal": refusal, "empty": w == 0}
-    if q.get("category") == "abstention":
+    narration = bool(scoring.NARRATION.search(answer))
+    row = {"words": w, "hedge": hedge, "refusal": refusal, "empty": w == 0, "narration": narration}
+    if narration:
+        row["ok"] = False
+    elif q.get("category") == "abstention":
         row["ok"] = refusal and w <= scoring.ABSTENTION_MAX_WORDS and not hedge
     elif exp:
         hits = sum(1 for e in exp if scoring.has_entity(answer, e))
@@ -73,7 +76,7 @@ def run(a):
         s = score(q, ans)
         rows.append({"id": q.get("id", f"q{i}"), "category": q.get("category", ""), "query": q["query"],
                      "answer": ans, "latency_s": round(dt, 1), "error": err, **s})
-        flag = " ".join(k for k in ("hedge", "refusal", "empty") if s.get(k))
+        flag = " ".join(k for k in ("hedge", "refusal", "empty", "narration") if s.get(k))
         okm = "" if "ok" not in s else ("OK " if s["ok"] else "MISS ")
         print(f"[{i:2}/{len(qs)}] {rows[-1]['id']:12} {q.get('category', ''):13} {s['words']:4}w {dt:6.1f}s {okm}{flag} {err}",
               file=sys.stderr)
@@ -83,6 +86,7 @@ def run(a):
                "max_words": max(ws) if ws else None,
                "median_latency_s": round(statistics.median(r["latency_s"] for r in rows), 1) if rows else None,
                "empty": sum(1 for r in rows if r["empty"]), "hedge": sum(1 for r in rows if r["hedge"]),
+               "narration": sum(1 for r in rows if r["narration"]),
                "errors": sum(1 for r in rows if r["error"]),
                "ok": f"{sum(1 for r in rows if r.get('ok'))}/{sum(1 for r in rows if 'ok' in r)}",
                "ts": time.strftime("%Y%m%d-%H%M%S")}
@@ -105,7 +109,7 @@ def compare(a):
             m = next((x for x in r["rows"] if x["id"] == qid), None)
             cells.append("-" if m is None else f"{m['words']}w {m['latency_s']}s" + (" ok" if m.get("ok") else (" MISS" if "ok" in m else "")))
         print(f"{qid:14}" + "".join(f"{c:>24}" for c in cells))
-    for k in ("median_words", "max_words", "median_latency_s", "empty", "hedge", "errors", "ok"):
+    for k in ("median_words", "max_words", "median_latency_s", "empty", "hedge", "narration", "errors", "ok"):
         print(f"{k:14}" + "".join(f"{str(r['summary'].get(k, '')):>24}" for r in runs))
 
 

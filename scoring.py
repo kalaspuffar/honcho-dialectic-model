@@ -27,6 +27,12 @@ REFUSAL = re.compile(
     r"\b(doesn'?t|does not|don'?t|do not|never|didn'?t|did not) (say|mention|state|record|indicate|show|note)\b|"
     r"\bhas only (mentioned|said|noted|talked about|referred to)\b|\bno known\b", re.I)
 
+# Tool-call narration leaking out as the final answer ("Search for X and Y.", "Let me search…"):
+# seen once in 75 Honcho harness answers (s150_sft at `max`, 2026-09-12). Honcho shows it to the
+# user as the answer, so it counts as a failed row wherever it appears.
+NARRATION = re.compile(r"^\s*(search(ing)? (for|memory|messages)|let me (search|look|check|grep)|i('ll| will) (search|look|check|grep)|"
+                       r"grep(ping)? (for|messages)|calling |first,? (search|let me))", re.I)
+
 ABSTENTION_MAX_WORDS = 60
 
 
@@ -46,26 +52,30 @@ def words(text: str) -> int:
 
 
 def score_answer(ctx: dict, answer: str) -> dict:
-    """{words, coverage, fab, abst, hedge, refusal, req_ok}"""
+    """{words, coverage, fab, abst, hedge, refusal, req_ok, narration}"""
     a = answer or ""
     w = words(a)
     hedge = bool(HEDGE.search(a))
     refusal = bool(REFUSAL.search(a))
+    narration = bool(NARRATION.search(a))
+    if narration:   # a search plan is not an answer, whatever it happens to mention
+        return {"words": w, "coverage": 0.0, "fab": False, "abst": False,
+                "hedge": hedge, "refusal": False, "req_ok": False, "narration": True}
     req = [e for e in (ctx.get("required_facts") or []) if e]
     forb = [e for e in (ctx.get("forbidden_facts") or []) if e]
     if not a.strip():
         return {"words": 0, "coverage": 0.0, "fab": False, "abst": False,
-                "hedge": False, "refusal": False, "req_ok": False}
+                "hedge": False, "refusal": False, "req_ok": False, "narration": False}
     if ctx.get("category") == "abstention":
         abst = refusal and w <= ABSTENTION_MAX_WORDS and not hedge
         return {"words": w, "coverage": 1.0 if abst else 0.0, "fab": False, "abst": abst,
-                "hedge": hedge, "refusal": refusal, "req_ok": abst}
+                "hedge": hedge, "refusal": refusal, "req_ok": abst, "narration": False}
     hits = sum(1 for e in req if has_entity(a, e))
     coverage = hits / len(req) if req else 0.0
     req_ok = hits > 0
     fab = bool(forb) and not req_ok and any(has_entity(a, f) for f in forb)
     return {"words": w, "coverage": round(coverage, 3), "fab": fab, "abst": False,
-            "hedge": hedge, "refusal": refusal, "req_ok": req_ok}
+            "hedge": hedge, "refusal": refusal, "req_ok": req_ok, "narration": False}
 
 
 def aggregate(ctxs, scores):
@@ -84,4 +94,5 @@ def aggregate(ctxs, scores):
         "abstention_correct": f"{sum(1 for s in scores if s['abst'])}/{n_abst}",
         "hedge_rows": sum(1 for s in scores if s["hedge"]),
         "empty_rows": sum(1 for s in scores if s["words"] == 0),
+        "narration_rows": sum(1 for s in scores if s.get("narration")),
     }
