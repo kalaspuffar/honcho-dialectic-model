@@ -20,6 +20,7 @@ Plan, decisions and status live in [PLAN.md](PLAN.md); the training runbook and 
 | `eval_model.py` | score any Ollama model on held-out scenarios; `compare` two runs |
 | `probe_toolcalls.py` | confirm the tuned model still emits valid tool calls |
 | `verify_all.sh` | post-training A/B: probe + baseline vs tuned on the eval split |
+| `SUMMARY_PLAN.md` | proposal for a Honcho *summary* model (to move to its own repo): measure-first gate, ledger-based chains, SFT-only recipe |
 | `honcho_harness.py` | Phase D: questions through the REAL Honcho loop (`/v3/.../peers/{peer}/chat`), words/latency/flags per question, `compare` two runs; `harness_questions.example.json` is the template (5 original + 5 hard) |
 | `llm_backend.py` | shared: model table, keys, OpenRouter concurrency, Anthropic Message Batches, JSONL helpers |
 | `trajectory.py` | shared: builds the Honcho conversation (system → user → tool calls → tool results); tool schemas; Ollama answer loop |
