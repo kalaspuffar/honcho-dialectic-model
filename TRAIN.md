@@ -544,3 +544,29 @@ DIALECTIC_LEVELS__low__MODEL_CONFIG__OVERRIDES__BASE_URL=http://node7.ea.org:114
 ```
 The retrain (separate-tokenization encoding) remains the durable fix: it makes the model correct
 without the flag and on any Ollama version.
+
+### 2026-09-12 11:00 — 50-row smoke: PASS, first deployable model
+
+`dialectic_s50` (50 rows, SFT 2 epochs under the separate-tokenization encoding, exported with the
+unchanged pipeline, served by Ollama 0.32.12 through `/v1` with **no flags**), 50 held-out rows vs the
+302-row base column from the morning:
+
+| | qwen3.5:9b (302) | dialectic_s50 (50) |
+|---|---|---|
+| median / max words | 122 / 641 | **29 / 64** |
+| coverage | .876 | **.881** |
+| fabrication rows | 1 | 0 |
+| abstention correct | 3/32 | **5/5** |
+| hedge rows | 44 | 2 |
+| empty / answered-in-thinking | 3 / 160 | **0 / 0** |
+| rows over-searching | 80 (26 %) | 8 (16 %) |
+| probe | 5/5 | 5/5 |
+
+So the encoding fix holds through the real serving path: the model emits `</think>` itself after
+Ollama's `<think>\n`. `reasoning_effort: none` on node7's Ollama 0.32.12 does **not** switch thinking
+off for `dialectic_500b` (still reasoning 365 chars, content empty), so that Honcho lever is not
+available on this host and `dialectic_500b` stays undeployable; `dialectic_s50` needs no lever.
+
+Open: n=50 for the tuned column; over-searching 16 % is the one number to watch as rows grow
+(search-again turns are trained); whether the smoke included the DPO step (6 steps) is immaterial
+to the pass. The base column is still measured at temperature 0.1, not its Modelfile default.

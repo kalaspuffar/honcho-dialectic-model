@@ -272,6 +272,8 @@ back to this host → I fold `summary.json` + your blind-review picks into §3.2
 | `dialectic_3` | **1000** | |
 | `dialectic-qwen3.5-9b` | 25 | process-verification run |
 | `dialectic_500` | **500** (v0.8.0, 2026-09-11) | first run that actually learned the data; overfit SFT (3 ep) + saturated DPO (1e-5); synthesis eval coverage .924 / 0 fabrication / 5/5 abstention on 50 held-out rows, but **probe 0/5 — no tool calls, fabricates without context. Not deployable.** |
+| `dialectic_500b` | **500** (v0.8.1, stripped Qwen3.5-9B, 2026-09-11/12) | tool turns trained: probe 5/5, DPO calibrated; but answers land in Ollama's `reasoning` field on 302/302 rows (model never emits `</think>` after the served `<think>\n`; TRAIN.md §12). `reasoning_effort: none` is not honoured by Ollama 0.32.12. **Not deployable via /v1.** |
+| `dialectic_s50` | **50** (v0.8.2 encoding, 2 SFT epochs, 2026-09-12) | **first deployable model.** Through plain `/v1`, no flags: probe 5/5, 50 held-out rows median 29 words (base 122), coverage .881 (base .876), fabrication 0, abstention 5/5, hedges 2, empty 0, answered-in-thinking 0, over-search 8/50 (base 80/302). |
 
 Validation (2026-09-09): the three are behaviorally indistinguishable — head-to-head 10 wins/9 losses each across 152 common rows; all ~0.68–0.70 coverage vs base 0.663; all ~1.5× more terse than base; all serve 16k/32k context fine via `num_ctx` override (no retrain needed). Full write-up + open questions (why 500≈2000: method vs data-prep vs premise) in vault `active-projects/Honcho-Dialectic-Verbosity-Report.md` §11.
 
@@ -331,3 +333,13 @@ Validation (2026-09-09): the three are behaviorally indistinguishable — head-t
   `qwen3.5:9b` via Ollama answers inside `<think>` and returns empty content (31/50 rows); Qwen3.5
   cannot disable thinking, which is part of why we fine-tune. The eval scores the base's reasoning
   text when content is empty (`--answer-from-reasoning`) and reports the count (TRAIN.md §7).
+
+- **2026-09-12** Pipeline validated end to end on the right base. Root cause of the empty answers was
+  a training/serving token mismatch at the start of the assistant turn (TRAIN.md §12); fixed by
+  tokenizing the served prompt and the `\n</think>\n\n`+turn completion separately. A 50-row smoke
+  (`dialectic_s50`) beats the base on every metric through the same `/v1` path Honcho uses. Honcho
+  (v3.1.2, read from source) reaches Ollama only via the OpenAI-compatible endpoint and reads
+  `content` only; its `THINKING_EFFORT=none` lever is not honoured by node7's Ollama 0.32.12, so the
+  model must close the think block itself — which it now does. Next: `dialectic_s50` on the full
+  302-row eval and into Honcho's `low` level for the harness A/B; 500-row retrain under the new
+  encoding to see whether data size moves anything beyond 50 rows.
