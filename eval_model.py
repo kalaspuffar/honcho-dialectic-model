@@ -39,7 +39,8 @@ def run(a):
     def one(c):
         try:
             r = answer_with_ollama(base, model_id, c, max_rounds=a.max_rounds, temperature=a.temperature,
-                                   max_tokens=a.max_tokens, api_key=api_key)
+                                   max_tokens=a.max_tokens, api_key=api_key,
+                                   extra_body={"reasoning_effort": a.reasoning_effort} if a.reasoning_effort else None)
         except Exception as e:  # noqa: BLE001
             r = {"answer": "", "extra_calls": 0, "forced": False, "error": f"{type(e).__name__}: {e}"}
         reasoning = r.get("reasoning") or ""
@@ -58,7 +59,7 @@ def run(a):
             print(f"[{i:3}/{len(ctxs)}] {c['id']} [{c.get('category', ''):13}] {row['words']:4}w cov={row['coverage']:.2f} "
                   f"fab={row['fab']} abst={row['abst']} hedge={row['hedge']} extra_calls={row['extra_calls']}", file=sys.stderr)
     agg = scoring.aggregate(used, scores)
-    agg.update(model=a.model, forced_rows=sum(1 for r in rows if r["forced"]),
+    agg.update(model=a.model, reasoning_effort=a.reasoning_effort, forced_rows=sum(1 for r in rows if r["forced"]),
                rows_with_extra_tool_calls=sum(1 for r in rows if r["extra_calls"]),
                # content empty, reasoning text present: the model answered inside <think> and stopped
                # (qwen3.5:9b on Ollama). Honcho would see nothing. With --answer-from-reasoning the
@@ -79,7 +80,7 @@ def compare(a):
             tables.append(json.load(open(sp)))
         else:
             sys.exit(f"missing {sp} (produced by a run)")
-    keys = ["model", "n", "median_words", "mean_words", "max_words", "mean_coverage",
+    keys = ["model", "reasoning_effort", "n", "median_words", "mean_words", "max_words", "mean_coverage",
             "fabrication_rows", "abstention_correct", "hedge_rows", "empty_rows", "answered_in_thinking_rows",
             "scored_from_reasoning", "forced_rows", "rows_with_extra_tool_calls"]
     w = max(len(k) for k in keys)
@@ -102,6 +103,9 @@ def main():
     p.add_argument("--max-rounds", type=int, default=3)
     p.add_argument("--max-tokens", type=int, default=1024)
     p.add_argument("--temperature", type=float, default=0.1)
+    p.add_argument("--reasoning-effort", default=None,
+                   help="send reasoning_effort (e.g. none) like Honcho's MODEL_CONFIG__THINKING_EFFORT; "
+                        "Ollama's /v1 maps 'none' to think=false")
     p.add_argument("--answer-from-reasoning", action="store_true",
                    help="when content is empty but a reasoning field came back, score the reasoning text "
                         "(baseline column: qwen3.5:9b on Ollama answers inside <think>; the summary still "

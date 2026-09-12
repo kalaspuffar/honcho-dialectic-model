@@ -508,3 +508,39 @@ close the tag. Pass = `--stage check` trainable text begins `\n</think>\n\n`; `-
 epochs ≈ 100 steps ≈ 40 min SFT; DPO 50 pairs = 6 steps ≈ 15 min, too few to learn anything and
 kept only to exercise the encoder (skip it if in a hurry). `verify_all.sh` gained `LIMIT=` and
 `BASELINE_JSONL=` (reuse `results/ab_20260912-075107/eval_baseline.jsonl`).
+
+### 2026-09-12 — what Honcho actually sends (read from plastic-labs/honcho main, v3.1.2)
+
+- Transports are `anthropic | openai | gemini` only (`src/config.py`). Ollama is reached as
+  `transport=openai` + `MODEL_CONFIG__OVERRIDES__BASE_URL=http://<host>:11434/v1`, through the
+  OpenAI SDK's `chat.completions.create` (`src/llm/backends/openai.py`). Same path as our eval;
+  there is **no native `/api/chat` and no `think` field**.
+- The answer is `choices[0].message.content`. Reasoning is read only from `reasoning_details` /
+  `reasoning_content` and only for telemetry (`thinking_content`); Ollama's `/v1` returns it as
+  `reasoning`, which Honcho does not read at all. An answer inside `<think>` is therefore an
+  **empty dialectic answer in production** (this is also what PLAN §1's "minimal = qwen3.5:4b returned
+  empty answers" was).
+- `MODEL_CONFIG.thinking_effort` (env `DIALECTIC_LEVELS__<level>__MODEL_CONFIG__THINKING_EFFORT`,
+  alias `REASONING_EFFORT`; values none|minimal|low|medium|high|xhigh|max) is sent as
+  `reasoning_effort` on every call. Ollama's `openai/openai.go` (main) maps `reasoning_effort:
+  "none"` → `think=false`, i.e. the built-in renderer emits the closed block — the prompt from which
+  `dialectic_500b` already answers correctly (sample stage). **Whether node7's Ollama has that
+  mapping is the one thing to test**: `probe_empty.py … dialectic_500b … '{"reasoning_effort": "none"}'`
+  (older Ollama: ignored or HTTP 400 "invalid reasoning value").
+- Temperature: Honcho sends it only if configured; otherwise Ollama's Modelfile defaults apply
+  (official `qwen3.5:9b`: temperature 1, top_p .95, presence_penalty 1.5 — Qwen's recommended
+  thinking-mode sampling). Our eval and Daniel's dialectic Modelfile use 0.1. The base's
+  answer-inside-think at 0.1 may partly be a low-temperature artifact; PLAN §1's 304-word Honcho
+  baseline ran at the Modelfile defaults. The tuned model is trained not to think, so 0.1 is fine
+  for it; the base column should be re-measured at the defaults before it is quoted as "production".
+- `eval_model.py --reasoning-effort none` now sends what Honcho would send with THINKING_EFFORT=none.
+
+If node7's Ollama honours it, production config for the A/B with the existing weights:
+```
+DIALECTIC_LEVELS__low__MODEL_CONFIG__TRANSPORT=openai
+DIALECTIC_LEVELS__low__MODEL_CONFIG__MODEL=dialectic_500b
+DIALECTIC_LEVELS__low__MODEL_CONFIG__THINKING_EFFORT=none
+DIALECTIC_LEVELS__low__MODEL_CONFIG__OVERRIDES__BASE_URL=http://node7.ea.org:11434/v1
+```
+The retrain (separate-tokenization encoding) remains the durable fix: it makes the model correct
+without the flag and on any Ollama version.

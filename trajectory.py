@@ -192,7 +192,7 @@ def _add_usage(total, usage):
         total[k] = total.get(k, 0) + int(usage.get(k) or 0)
 
 
-def answer_with_ollama(base, model, ctx, max_rounds=3, temperature=0.3, max_tokens=1500, api_key=None):
+def answer_with_ollama(base, model, ctx, max_rounds=3, temperature=0.3, max_tokens=1500, api_key=None, extra_body=None):
     """Run the student model on the trajectory, the way Honcho's loop would.
 
     Works against any OpenAI-compatible /chat/completions endpoint: Ollama's /v1
@@ -206,9 +206,13 @@ def answer_with_ollama(base, model, ctx, max_rounds=3, temperature=0.3, max_toke
     qwen3.5:9b does on Ollama, and what the fine-tune is meant to remove."""
     msgs = build_messages(ctx, arguments_as_string=True)
     extra, forced, usage = 0, False, {}
+    # extra_body: request fields Honcho can also send, e.g. {"reasoning_effort": "none"} — Ollama's /v1
+    # maps that to think=false (closed <think> block in the prompt); Honcho sends it from
+    # DIALECTIC_LEVELS__<level>__MODEL_CONFIG__THINKING_EFFORT=none (TRAIN.md §12, 2026-09-12).
+    xb = extra_body or {}
     for _ in range(max_rounds):
         m, u = _chat(base, {"model": model, "temperature": temperature, "max_tokens": max_tokens,
-                            "messages": msgs, "tools": TOOL_SCHEMAS}, api_key=api_key)
+                            "messages": msgs, "tools": TOOL_SCHEMAS, **xb}, api_key=api_key)
         _add_usage(usage, u)
         calls = m.get("tool_calls") or []
         if not calls:
@@ -220,7 +224,7 @@ def answer_with_ollama(base, model, ctx, max_rounds=3, temperature=0.3, max_toke
                          "name": (tc.get("function") or {}).get("name", ""), "content": NO_RESULTS})
     forced = True
     m, u = _chat(base, {"model": model, "temperature": temperature, "max_tokens": max_tokens,
-                        "messages": msgs}, api_key=api_key)
+                        "messages": msgs, **xb}, api_key=api_key)
     _add_usage(usage, u)
     return _result(m, extra, forced, usage)
 
