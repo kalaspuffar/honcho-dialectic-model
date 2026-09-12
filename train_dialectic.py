@@ -12,6 +12,9 @@ Stages
   dpo     preference training on chosen/rejected pairs (hand-rolled, no trl); stops early once the
           loss has saturated (--dpo-stop-loss / --dpo-stop-patience)
   export  merged HF dir -> GGUF Q4_K_M for `ollama create`
+  sample  merged HF dir + one SFT row: render the prefix with the checkpoint's own chat template,
+          generate greedily, print the RAW text incl. special tokens (is </think> emitted at once?
+          separates a model problem from an Ollama template/parser problem)
 
 Usage (GPU host, Unsloth venv):
   python3 train_dialectic.py --stage strip  --out /data/smoke/qwen35-9b-text        # once per host
@@ -422,6 +425,32 @@ def run_dpo(data, out, base, beta, epochs, lr, max_seq, bits, length_norm=False,
     return save_outputs(model, tokenizer, out)
 
 
+# ----------------------------------------------------------------- sample
+def run_sample(hf_dir, data, max_new=96, row_index=0):
+    """Greedy generation from a merged checkpoint on one SFT row's prefix, through the checkpoint's
+    own chat template (so the prompt ends exactly as it did in training). Prints raw text with
+    special tokens. Expected after v0.8.1 SFT on Qwen3.5: '\n\n</think>\n\n<answer><|im_end|>'."""
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    base = resolve_base(hf_dir)
+    rows = read_jsonl(data)
+    row = rows[row_index]
+    msgs = row["messages"] if "messages" in row else row["prompt"]
+    prefix = msgs[:-1] if msgs[-1]["role"] == "assistant" else msgs
+    tok = AutoTokenizer.from_pretrained(base)
+    kw = {"tools": row["tools"]} if row.get("tools") else {}
+    prompt = tok.apply_chat_template(prefix, tokenize=False, add_generation_prompt=True, **kw)
+    print("[sample] prompt tail (raw):", repr(prompt[-160:]))
+    model = AutoModelForCausalLM.from_pretrained(base, torch_dtype=torch.bfloat16, device_map="auto")
+    ids = tok(prompt, return_tensors="pt", add_special_tokens=False).to(model.device)
+    with torch.no_grad():
+        out = model.generate(**ids, max_new_tokens=max_new, do_sample=False)
+    gen = out[0][ids["input_ids"].shape[1]:]
+    print(f"[sample] {len(gen)} new tokens, raw:", repr(tok.decode(gen, skip_special_tokens=False)))
+    if "messages" in row:
+        print("[sample] training target was:", repr(msgs[-1].get("content") or msgs[-1].get("tool_calls")))
+
+
 # ----------------------------------------------------------------- strip / export
 def run_strip(repo, out):
     """Official Qwen3.5 VL checkpoint -> text-only Qwen3_5ForCausalLM (drops model.visual.* / mtp.*)."""
@@ -460,7 +489,7 @@ def run_export(hf_dir, out, bits=4):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--stage", required=True, choices=["check", "sft", "merge", "dpo", "export", "strip"])
+    ap.add_argument("--stage", required=True, choices=["check", "sft", "merge", "dpo", "export", "strip", "sample"])
     ap.add_argument("--data", help="jsonl (sft or dpo rows)")
     ap.add_argument("--eval-data", help="sft: held-out sft rows (build_dataset *_eval.sft.jsonl)")
     ap.add_argument("--sft", help="dpo: merged HF dir from the sft stage")
@@ -477,6 +506,8 @@ def main():
                     help="sft/check: also train the assistant tool_calls turns of each trajectory (default all; "
                          "'none' = final answer only, which lost tool calling in v0.8.0)")
     ap.add_argument("--dpo-beta", type=float, default=0.1)
+    ap.add_argument("--row", type=int, default=0, help="sample: which row of --data to generate from")
+    ap.add_argument("--max-new", type=int, default=96, help="sample: tokens to generate")
     ap.add_argument("--dpo-length-norm", action="store_true", help="per-token normalised DPO (v0.7 behaviour)")
     ap.add_argument("--dpo-stop-loss", type=float, default=DPO_STOP["loss"],
                     help=f"dpo: stop once the logged loss stays below this (default {DPO_STOP['loss']}; 0 disables)")
@@ -486,13 +517,16 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     a = ap.parse_args()
 
-    if a.stage in ("check", "sft", "export") and not a.model:
+    if a.stage in ("check", "sft", "export", "sample") and not a.model:
         sys.exit("--model required: the text-only checkpoint dir from --stage strip (e.g. /data/smoke/qwen35-9b-text)")
     if a.stage == "check":
         if not a.data: sys.exit("--data required")
         return run_check(a.model, a.data, a.max_seq, a.tool_turns)
+    if a.stage == "sample":
+        if not a.data: sys.exit("--data required (an sft or dpo jsonl)")
+        return run_sample(a.model, a.data, a.max_new, a.row)
     if FastLanguageModel is None and a.stage != "strip":
-        sys.exit("unsloth is not installed in this environment (only --stage check / strip work without it)")
+        sys.exit("unsloth is not installed in this environment (only --stage check / sample / strip work without it)")
     if not a.out:
         sys.exit("--out required")
     if a.stage == "strip":

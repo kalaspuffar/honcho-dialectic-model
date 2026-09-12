@@ -411,3 +411,40 @@ the prompt or tool results is in the loss. Qwen3.5's template renders tool calls
 not the JSON block §9 describes for Qwen3; Ollama's Qwen3.5 template parses the same form.
 Tool turns are ~74 % of SFT samples; fall back to `--tool-turns first` (1:1) only if the answer
 turns look under-trained after SFT. Read-out (SFT/DPO tables, probe, eval) to follow.
+
+### Read-out (2026-09-12) — training worked, serving did not
+
+SFT (2 epochs, 964 steps, 6 h 24 min): eval loss ep1 **0.1550**, ep2 **0.1524**; final train loss 0.05.
+Flat across epochs and no overfitting signal, unlike the 8B run's .44 → .60 (§10). Epoch 2 merged.
+
+DPO (63 steps, lr 3e-6, 2 h 29 min): step 60 loss 0.14–0.35, margin 0.9–1.9, acc 1.00, d_chosen ≈ 0,
+d_rejected −4 … −19. Ordering learned by pushing the rejected answers down; **not saturated** at the
+end of the epoch (early stop never fired), so the §10 sizing rule is roughly right for this base —
+ends slightly under saturation rather than 4× past it as at 1e-5.
+
+`probe_toolcalls.py dialectic_500`: **5/5 PASS**, every call a well-formed `search_memory` with
+observer/observed/top_k. The v0.8.1 tool-turn fix (§11) is validated on the right base.
+
+`eval_model.py compare` (50 rows): tuned **50/50 empty, answered_in_thinking_rows 50**, 7 rows with
+extra tool calls. Base 31/50 empty (run without `--answer-from-reasoning`, so its words/coverage are
+over the 19 rows that answered in content). The tuned model's whole output lands in Ollama's
+`reasoning` field and nothing in `content` — the same shape as the base, only now on every row.
+
+Hypothesis: a **template mismatch between training and Ollama**, not a model failure. Training
+rendered the generation prompt through the checkpoint's own Qwen3.5 template, which ends the
+assistant turn opener with `<think>` (§12 check: the trainable span begins `\n\n</think>\n\n`). The
+model therefore emits `</think>` first and then the answer. If the Ollama model created from the GGUF
+uses a template/parser that does not open `<think>` in the prompt, or parses thinking differently,
+the model's `</think>` is not matched to an opening and the parser keeps everything as reasoning.
+The earlier 8B `dialectic_500` (§11) had no think prefill in its template and returned content fine.
+
+Diagnostics (no retraining):
+```
+ollama show dialectic_500 --modelfile ; ollama show dialectic_500 --template      # what Ollama wraps the GGUF in
+python3 train_dialectic.py --stage sample --model runs/v2-dpo-500/merged --data data/dataset_500_train.sft.jsonl
+    # model alone, HF template: expect '\n\n</think>\n\n<answer><|im_end|>' — if so, the model is fine
+python3 probe_empty.py http://node7.ea.org:11434/v1 dialectic_500 data/contexts.jsonl c00102   # reasoning head
+```
+Fix candidates, in order: Modelfile `TEMPLATE` (and `RENDERER`/`PARSER` if Ollama offers them for the
+Qwen3.5 family) so the prompt ends in `<|im_start|>assistant\n<think>\n` like training; or a
+Modelfile that derives from the `qwen3.5:9b` tag's template. Do **not** retrain for this.
