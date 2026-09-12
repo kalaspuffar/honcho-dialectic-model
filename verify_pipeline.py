@@ -157,6 +157,30 @@ class FakeTok:
         return f"<{len(ids)} tokens>"
 
 
+class ThinkTok(FakeTok):
+    """Qwen3.5-shaped: generation prompt ends '<think>\n' unless enable_thinking=False; a full
+    assistant turn renders the closed block. Tokens: whitespace words, so '<think>' '</think>' are tokens."""
+    chat_template = "... {%- if enable_thinking is defined and enable_thinking is false %} ..."
+
+    def apply_chat_template(self, msgs, tokenize=False, add_generation_prompt=False, tools=None, enable_thinking=None, **kw):
+        prefix = [m for m in msgs if m["role"] != "assistant" or m is not msgs[-1]]
+        if add_generation_prompt:
+            base = FakeTok.apply_chat_template(self, msgs, tools=tools, add_generation_prompt=True)
+            return base + (" <think> \n\n </think> \n\n" if enable_thinking is False else " <think> \n")
+        base = FakeTok.apply_chat_template(self, msgs[:-1], tools=tools, add_generation_prompt=True)
+        m = msgs[-1]; c = m.get("content") or ""
+        if m.get("tool_calls"):
+            c += " <tool_call> " + json.dumps(m["tool_calls"][0]["function"]["arguments"], sort_keys=True).replace(" ", "")
+        return base + " <think> \n\n </think> \n\n " + c + " <|end|>"
+
+_te = td.encode_example(ThinkTok(), msgs, "April 22.", trajectory.TOOL_SCHEMAS, 100000)
+_served = ThinkTok()(ThinkTok().apply_chat_template(msgs, tools=trajectory.TOOL_SCHEMAS, add_generation_prompt=True))["input_ids"]
+_want = ThinkTok()("\n</think>\n\n April 22. <|end|>")["input_ids"]
+ok("train prep: think-switch template -> prompt tokenized as served ('<think>\\n'), completion closes the block",
+   _te["input_ids"][:len(_served)] == _served and _te["labels"][:len(_served)] == [-100] * len(_served)
+   and _te["input_ids"][len(_served):] == _want and _te["labels"][len(_served):] == _want, str(_te)[:200])
+ok("train prep: think-switch over-long dropped", td.encode_example(ThinkTok(), msgs, "April 22.", None, 5) is None)
+
 enc = td.encode_example(FakeTok(), msgs, "April 22.", trajectory.TOOL_SCHEMAS, 100000)
 n_train = sum(1 for l in enc["labels"] if l != -100)
 ok("train prep: labels cover answer + end marker only", n_train == 3, f"trainable={n_train}")  # 'April' '22.' '<|end|>'

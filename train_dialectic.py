@@ -94,20 +94,40 @@ def read_jsonl(path):
     return [json.loads(l) for l in open(path) if l.strip()]
 
 
+THINK_OPEN, THINK_CLOSED = "<think>\n", "<think>\n\n</think>\n\n"
+
+
 def encode_example(tokenizer, prefix_msgs, answer, tools, max_len):
-    """Tokenize prefix + answer through the chat template; labels = answer tokens only.
+    """Tokenize prefix + answer through the chat template; labels = the trainable turn only.
     `answer` is the final assistant text, or a whole assistant message (tool_calls turn).
-    Returns None when the full sequence exceeds max_len (we never truncate the answer)."""
+    Returns None when the full sequence exceeds max_len (we never truncate the answer).
+
+    Thinking (TRAIN.md §12): Qwen3/3.5 templates end the generation prompt with THINK_OPEN unless
+    enable_thinking=False (then THINK_CLOSED). Ollama's built-in renderer serves THINK_OPEN, so the
+    model must learn to CLOSE the block itself: the prompt is tokenized as served (…THINK_OPEN) and the
+    completion '\n</think>\n\n' + turn is tokenized separately and appended — the exact tokens the
+    model will have to produce. The v0.8.1 run rendered prompt+turn as one string and let the
+    tokenizer merge '<think>' + '\n\n' differently from the served '<think>' + '\n'; the model never
+    saw the served pair and skipped straight to the answer, which Ollama then filed as reasoning."""
     target = answer if isinstance(answer, dict) else {"role": "assistant", "content": answer}
     msgs = list(prefix_msgs) + [target]
     kw = {"tools": tools} if tools else {}
-    # enable_thinking=False: the generation prompt ends with the CLOSED think block, the same text the
-    # exported model is served with (close_thinking_template), so the trainable span is the turn itself.
-    # v0.8.1 trained '\n\n</think>\n\n' + turn after a bare '<think>' and the served model, prompted
-    # with '<think>\n', skipped the closing tag (TRAIN.md §12).
-    full = tokenizer.apply_chat_template(msgs, tokenize=False, **kw, **_think_kw(tokenizer))
-    prompt = tokenizer.apply_chat_template(prefix_msgs, tokenize=False, add_generation_prompt=True, **kw,
-                                           **_think_kw(tokenizer))
+    tk = _think_kw(tokenizer)
+    if tk:
+        closed = tokenizer.apply_chat_template(prefix_msgs, tokenize=False, add_generation_prompt=True, **kw, **tk)
+        served = tokenizer.apply_chat_template(prefix_msgs, tokenize=False, add_generation_prompt=True, **kw)
+        full = tokenizer.apply_chat_template(msgs, tokenize=False, **kw, **tk)
+        if closed.endswith(THINK_CLOSED) and served.endswith(THINK_OPEN) and full.startswith(closed):
+            completion = "\n</think>\n\n" + full[len(closed):]
+            prompt_ids = tokenizer(served, add_special_tokens=False)["input_ids"]
+            target_ids = tokenizer(completion, add_special_tokens=False)["input_ids"]
+            if len(prompt_ids) + len(target_ids) > max_len:
+                return None
+            return {"input_ids": prompt_ids + target_ids, "attention_mask": [1] * (len(prompt_ids) + len(target_ids)),
+                    "labels": [-100] * len(prompt_ids) + target_ids}
+    # templates without the switch (or an unexpected shape): longest common token prefix
+    full = tokenizer.apply_chat_template(msgs, tokenize=False, **kw)
+    prompt = tokenizer.apply_chat_template(prefix_msgs, tokenize=False, add_generation_prompt=True, **kw)
     full_ids = tokenizer(full, add_special_tokens=False)["input_ids"]
     prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
     if len(full_ids) > max_len:
@@ -452,10 +472,11 @@ def run_dpo(data, out, base, beta, epochs, lr, max_seq, bits, length_norm=False,
 
 
 # ----------------------------------------------------------------- sample
-def run_sample(hf_dir, data, max_new=96, row_index=0):
+def run_sample(hf_dir, data, max_new=96, row_index=0, open_think=False):
     """Greedy generation from a merged checkpoint on one SFT row's prefix, through the checkpoint's
-    own chat template with thinking closed by default (what --stage export embeds). Prints raw
-    text with special tokens. Expected: the terse answer or a <tool_call> block, then <|im_end|>."""
+    own chat template. --open-think serves THINK_OPEN (what Ollama's renderer does); the default
+    serves the closed block (what --stage export embeds). Prints raw text with special tokens.
+    Expected: open -> '\n</think>\n\n' + turn + <|im_end|>; closed -> turn + <|im_end|>."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
     base = resolve_base(hf_dir)
@@ -464,8 +485,11 @@ def run_sample(hf_dir, data, max_new=96, row_index=0):
     msgs = row["messages"] if "messages" in row else row["prompt"]
     prefix = msgs[:-1] if msgs[-1]["role"] == "assistant" else msgs
     tok = AutoTokenizer.from_pretrained(base)
-    tok.chat_template, patched = close_thinking_template(tok.chat_template)
-    print(f"[sample] chat template: thinking closed by default = {patched} (as --stage export embeds it)")
+    if open_think:
+        print("[sample] prompt ends with the OPEN think block, as Ollama's renderer serves it")
+    else:
+        tok.chat_template, patched = close_thinking_template(tok.chat_template)
+        print(f"[sample] chat template: thinking closed by default = {patched} (as --stage export embeds it)")
     kw = {"tools": row["tools"]} if row.get("tools") else {}
     prompt = tok.apply_chat_template(prefix, tokenize=False, add_generation_prompt=True, **kw)
     print("[sample] prompt tail (raw):", repr(prompt[-160:]))
@@ -538,6 +562,7 @@ def main():
     ap.add_argument("--dpo-beta", type=float, default=0.1)
     ap.add_argument("--row", type=int, default=0, help="sample: which row of --data to generate from")
     ap.add_argument("--max-new", type=int, default=96, help="sample: tokens to generate")
+    ap.add_argument("--open-think", action="store_true", help="sample: prompt ends '<think>\\n' (Ollama's renderer)")
     ap.add_argument("--dpo-length-norm", action="store_true", help="per-token normalised DPO (v0.7 behaviour)")
     ap.add_argument("--dpo-stop-loss", type=float, default=DPO_STOP["loss"],
                     help=f"dpo: stop once the logged loss stays below this (default {DPO_STOP['loss']}; 0 disables)")
@@ -554,7 +579,7 @@ def main():
         return run_check(a.model, a.data, a.max_seq, a.tool_turns)
     if a.stage == "sample":
         if not a.data: sys.exit("--data required (an sft or dpo jsonl)")
-        return run_sample(a.model, a.data, a.max_new, a.row)
+        return run_sample(a.model, a.data, a.max_new, a.row, a.open_think)
     if FastLanguageModel is None and a.stage != "strip":
         sys.exit("unsloth is not installed in this environment (only --stage check / sample / strip work without it)")
     if not a.out:

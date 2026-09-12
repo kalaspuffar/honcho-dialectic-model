@@ -460,3 +460,31 @@ ollama create dialectic_500b -f Modelfile        # FROM -> runs/v2-gguf-500b/<fi
 ollama show dialectic_500b --template | tail -8  # default branch must be '<think>\n\n</think>\n\n'
 BASE=http://node7.ea.org:11434 TUNED=dialectic_500b bash verify_all.sh
 ```
+
+### 2026-09-12 08:00 — closed-block template did not change what Ollama serves
+
+`dialectic_500b` (GGUF re-exported with the closed-block default; `ollama show --template | tail`
+confirms the patched branch) on the full 302-row eval: probe **5/5**, but still **302/302 empty,
+answered_in_thinking 302**, 33 rows with extra tool calls. `--stage sample` with the closed block
+gives the terse answer directly. So the model is right and the embedded Jinja template is right,
+and Ollama is not building the prompt from it — consistent with Ollama's *built-in* Qwen3.5 renderer
+(selected by architecture, prefilling `<think>\n` unless the native API gets `think: false`; `/v1`
+ignores that flag, §7). Baseline column, now scored from reasoning: median 122 words, coverage .876,
+1 fabrication, abstention 3/32, 44 hedges, 160/302 answered inside thinking, 80 rows over-searching.
+
+Training-side fix (this commit, `encode_example`): the prompt is tokenized exactly as served
+(`…<|im_start|>assistant\n<think>\n`) and the completion `\n</think>\n\n` + turn is tokenized
+separately and appended, so the model is trained to produce the closing tag itself from the served
+prefix. Works under both prompt shapes (the closed block is a suffix of the same token sequence).
+Self-test covers it with a Qwen3.5-shaped fake template. `--stage sample --open-think` previews the
+served shape. Retrain needed for this to take effect; SFT eval loss was flat across epochs
+(.155 → .152), so `--epochs 1` for SFT (~3.2 h) + DPO (~2.5 h) is the cheap rerun.
+
+Serving-side option, if Honcho can pass `think: false` on Ollama's native `/api/chat`: the existing
+`dialectic_500b` weights already answer correctly from the closed block (sample stage). To confirm:
+```
+ollama show dialectic_500b                                  # capabilities: does it list thinking?
+ollama show qwen3.5:9b --modelfile | grep -v '^#'            # RENDERER / PARSER lines = built-in renderer in use
+curl -s http://node7.ea.org:11434/api/chat -d '{"model":"dialectic_500b","stream":false,"think":false,"messages":[{"role":"user","content":"Reply with the single word ready."}]}'
+curl -s http://node7.ea.org:11434/api/chat -d '{"model":"dialectic_500b","stream":false,"messages":[{"role":"user","content":"Reply with the single word ready."}]}'
+```
