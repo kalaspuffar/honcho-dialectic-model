@@ -136,7 +136,9 @@ class FakeTok:
     """Minimal chat-template tokenizer: 1 token per whitespace word."""
     pad_token_id = 0
 
-    def apply_chat_template(self, msgs, tokenize=False, add_generation_prompt=False, tools=None):
+    chat_template = ""
+
+    def apply_chat_template(self, msgs, tokenize=False, add_generation_prompt=False, tools=None, **kw):
         parts = ["<tools>" if tools else ""]
         for m in msgs:
             c = m.get("content") or ""
@@ -183,6 +185,12 @@ lab = batch["labels"]
 lab = lab.tolist() if hasattr(lab, "tolist") else lab
 ok("train prep: collator pads labels with -100", lab[1][-1] == -100 and len(lab[0]) == len(lab[1]))
 ok("train: no hardcoded smoke split", "samples[:7]" not in defs["train_dialectic.py"])
+_tail = ("{%- if add_generation_prompt %}\n    {{- '<|im_start|>assistant\\n' }}\n"
+         "    {%- if enable_thinking is defined and enable_thinking is false %}\n        {{- '<think>\\n\\n</think>\\n\\n' }}\n"
+         "    {%- else %}\n        {{- '<think>\\n' }}\n    {%- endif %}\n{%- endif %}")
+_t, _p = td.close_thinking_template(_tail)
+ok("train: export closes the think block by default (TRAIN.md §12)", _p and td.THINK_SWITCH not in _t and td.THINK_SWITCH_CLOSED in _t)
+ok("train: unknown template left alone", td.close_thinking_template("{{ .Prompt }}") == ("{{ .Prompt }}", False))
 # 1e-5 (v0.8.0) saturated the 500-row run by step 25/126; the right value scales with 1/steps (TRAIN.md §10).
 ok("train: DPO lr in a plausible range", 3e-7 <= td.DPO_DEFAULTS["lr"] <= 2e-5)
 ok("train: DPO stops on saturation by default", td.DPO_STOP["loss"] > 0 and td.DPO_STOP["patience"] > 0)

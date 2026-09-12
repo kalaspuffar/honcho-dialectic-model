@@ -72,6 +72,23 @@ def resolve_base(name: str) -> str:
     return MODEL_ALIASES.get(n, n)
 
 
+# ----------------------------------------------------------------- chat template: thinking closed by default
+THINK_SWITCH = "{%- if enable_thinking is defined and enable_thinking is false %}"
+THINK_SWITCH_CLOSED = "{%- if not (enable_thinking is defined and enable_thinking is true) %}"
+
+
+def close_thinking_template(tmpl):
+    """Qwen3 / Qwen3.5 chat templates end the generation prompt with '<think>\n' unless the caller
+    passes enable_thinking=False, in which case they emit the CLOSED block '<think>\n\n</think>\n\n'.
+    Nothing in Ollama's /v1 (or Honcho) sets that flag, so the served model saw '<think>' + '\n', a
+    token pair it was never trained on, skipped the closing tag and its whole terse answer landed in
+    the reasoning field (TRAIN.md §12, 2026-09-12). Flip the default: closed unless enable_thinking
+    is explicitly true. Returns (template, patched?)."""
+    if not tmpl or THINK_SWITCH not in tmpl:
+        return tmpl, False
+    return tmpl.replace(THINK_SWITCH, THINK_SWITCH_CLOSED), True
+
+
 # ----------------------------------------------------------------- data prep
 def read_jsonl(path):
     return [json.loads(l) for l in open(path) if l.strip()]
@@ -84,8 +101,13 @@ def encode_example(tokenizer, prefix_msgs, answer, tools, max_len):
     target = answer if isinstance(answer, dict) else {"role": "assistant", "content": answer}
     msgs = list(prefix_msgs) + [target]
     kw = {"tools": tools} if tools else {}
-    full = tokenizer.apply_chat_template(msgs, tokenize=False, **kw)
-    prompt = tokenizer.apply_chat_template(prefix_msgs, tokenize=False, add_generation_prompt=True, **kw)
+    # enable_thinking=False: the generation prompt ends with the CLOSED think block, the same text the
+    # exported model is served with (close_thinking_template), so the trainable span is the turn itself.
+    # v0.8.1 trained '\n\n</think>\n\n' + turn after a bare '<think>' and the served model, prompted
+    # with '<think>\n', skipped the closing tag (TRAIN.md §12).
+    full = tokenizer.apply_chat_template(msgs, tokenize=False, **kw, **_think_kw(tokenizer))
+    prompt = tokenizer.apply_chat_template(prefix_msgs, tokenize=False, add_generation_prompt=True, **kw,
+                                           **_think_kw(tokenizer))
     full_ids = tokenizer(full, add_special_tokens=False)["input_ids"]
     prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
     if len(full_ids) > max_len:
@@ -95,6 +117,10 @@ def encode_example(tokenizer, prefix_msgs, answer, tools, max_len):
         k += 1
     labels = [-100] * k + full_ids[k:]
     return {"input_ids": full_ids, "attention_mask": [1] * len(full_ids), "labels": labels}
+
+
+def _think_kw(tokenizer):
+    return {"enable_thinking": False} if "enable_thinking" in (getattr(tokenizer, "chat_template", "") or "") else {}
 
 
 TOOL_TURNS = ("all", "first", "none")
@@ -428,8 +454,8 @@ def run_dpo(data, out, base, beta, epochs, lr, max_seq, bits, length_norm=False,
 # ----------------------------------------------------------------- sample
 def run_sample(hf_dir, data, max_new=96, row_index=0):
     """Greedy generation from a merged checkpoint on one SFT row's prefix, through the checkpoint's
-    own chat template (so the prompt ends exactly as it did in training). Prints raw text with
-    special tokens. Expected after v0.8.1 SFT on Qwen3.5: '\n\n</think>\n\n<answer><|im_end|>'."""
+    own chat template with thinking closed by default (what --stage export embeds). Prints raw
+    text with special tokens. Expected: the terse answer or a <tool_call> block, then <|im_end|>."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
     base = resolve_base(hf_dir)
@@ -438,6 +464,8 @@ def run_sample(hf_dir, data, max_new=96, row_index=0):
     msgs = row["messages"] if "messages" in row else row["prompt"]
     prefix = msgs[:-1] if msgs[-1]["role"] == "assistant" else msgs
     tok = AutoTokenizer.from_pretrained(base)
+    tok.chat_template, patched = close_thinking_template(tok.chat_template)
+    print(f"[sample] chat template: thinking closed by default = {patched} (as --stage export embeds it)")
     kw = {"tools": row["tools"]} if row.get("tools") else {}
     prompt = tok.apply_chat_template(prefix, tokenize=False, add_generation_prompt=True, **kw)
     print("[sample] prompt tail (raw):", repr(prompt[-160:]))
@@ -475,6 +503,8 @@ def run_export(hf_dir, out, bits=4):
     base = resolve_base(hf_dir)
     print(f"[export] {base} -> {out} q{bits}_k_m")
     model, tokenizer = FastLanguageModel.from_pretrained(model_name=base, max_seq_length=8192, dtype=None, token=None)
+    tokenizer.chat_template, patched = close_thinking_template(tokenizer.chat_template)
+    print(f"[export] chat template: thinking closed by default = {patched} (embedded in the GGUF; Ollama renders it)")
     os.makedirs(out, exist_ok=True)
     # tokenizer is the 2nd POSITIONAL; quant kwarg name differs across Unsloth releases -> introspect the bound method
     params = inspect.signature(model.save_pretrained_gguf).parameters

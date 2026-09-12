@@ -430,21 +430,33 @@ extra tool calls. Base 31/50 empty (run without `--answer-from-reasoning`, so it
 over the 19 rows that answered in content). The tuned model's whole output lands in Ollama's
 `reasoning` field and nothing in `content` — the same shape as the base, only now on every row.
 
-Hypothesis: a **template mismatch between training and Ollama**, not a model failure. Training
-rendered the generation prompt through the checkpoint's own Qwen3.5 template, which ends the
-assistant turn opener with `<think>` (§12 check: the trainable span begins `\n\n</think>\n\n`). The
-model therefore emits `</think>` first and then the answer. If the Ollama model created from the GGUF
-uses a template/parser that does not open `<think>` in the prompt, or parses thinking differently,
-the model's `</think>` is not matched to an opening and the parser keeps everything as reasoning.
-The earlier 8B `dialectic_500` (§11) had no think prefill in its template and returned content fine.
+Root cause (2026-09-12, `--stage sample` + `ollama show --template` + probe on c00102): **one control
+token at the start of the turn.** The Qwen3.5 template ends the generation prompt with `<think>\n`
+unless `enable_thinking=False`, in which case it emits the closed block `<think>\n\n</think>\n\n`.
+Training rendered the full turn as `<think>` `\n\n` `</think>` `\n\n` answer and put the loss on
+everything after `<think>`. Served (HF and Ollama alike, nothing sets the flag) the model sees
+`<think>` + `\n`, a pair it never saw, and continues straight into the answer: the sample stage printed
+`"'The Nightingale' by Kristin Hannah, finished 2026-03-15 and rated 4.5 stars.<|im_end|>"` with no
+`</think>` at all. Ollama had opened thinking in the prompt, never saw it closed, and filed the whole
+70-token answer as `reasoning` (c00102: reasoning 221 chars = the correct terse enumeration, content
+empty, finish_reason stop). Not an Ollama bug (its `--modelfile` is a bare `FROM` + params; it renders
+the GGUF's embedded Jinja template), not a model-quality problem.
 
-Diagnostics (no retraining):
+Fix (this commit, no retraining):
+- `--stage export` and `--stage sample` patch the embedded template so the default branch emits the
+  closed block (`close_thinking_template`; `enable_thinking=True` still opens it). The model then
+  continues from exactly the prefix it was trained on, and Ollama's parser puts the answer in content.
+  Verify after `ollama create`: `ollama show <name> --template | tail -8`.
+- Training (`encode_example`) now renders with `enable_thinking=False` too, so future runs train the
+  turn itself after the closed block — the same tokens the served model sees. Rows trained under
+  v0.8.1 are still valid: the model's continuation after `</think>\n\n` is what we want.
+- The root `Modelfile` has no TEMPLATE line on purpose; FROM points at the exported GGUF.
+
+Re-serve the existing v2 weights:
 ```
-ollama show dialectic_500 --modelfile ; ollama show dialectic_500 --template      # what Ollama wraps the GGUF in
-python3 train_dialectic.py --stage sample --model runs/v2-dpo-500/merged --data data/dataset_500_train.sft.jsonl
-    # model alone, HF template: expect '\n\n</think>\n\n<answer><|im_end|>' — if so, the model is fine
-python3 probe_empty.py http://node7.ea.org:11434/v1 dialectic_500 data/contexts.jsonl c00102   # reasoning head
+python3 train_dialectic.py --stage sample --model runs/v2-dpo-500/merged --data data/dataset_500_train.sft.jsonl   # closed-block prompt
+python3 train_dialectic.py --stage export --model runs/v2-dpo-500/merged --out runs/v2-gguf-500b
+ollama create dialectic_500b -f Modelfile        # FROM -> runs/v2-gguf-500b/<file>.gguf
+ollama show dialectic_500b --template | tail -8  # default branch must be '<think>\n\n</think>\n\n'
+BASE=http://node7.ea.org:11434 TUNED=dialectic_500b bash verify_all.sh
 ```
-Fix candidates, in order: Modelfile `TEMPLATE` (and `RENDERER`/`PARSER` if Ollama offers them for the
-Qwen3.5 family) so the prompt ends in `<|im_start|>assistant\n<think>\n` like training; or a
-Modelfile that derives from the `qwen3.5:9b` tag's template. Do **not** retrain for this.
