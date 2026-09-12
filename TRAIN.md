@@ -639,3 +639,31 @@ Schedule revision: at 50 rows this eval is near its ceiling (3 abstention rows o
 over-search ≤ 28 rows. Run 150 anyway (2.7 h): it is the first run where DPO actually trains and
 answers whether DPO adds anything over SFT. Do **not** schedule 500+ on these numbers; the decision
 comes from the Honcho harness A/B (PLAN §1 questions + the hard set) and whatever it exposes.
+
+### 2026-09-12 — s150 read-out and the Honcho harness across all levels
+
+`dialectic_s150` (150 rows, SFT 2 epochs, DPO 19 steps @ 1e-5 — the first run in which DPO trains),
+302 rows: median 23 w, coverage .912, fabrication 0, **abstention 32/32, hedges 0**, over-search 43,
+probe 5/5. Versus s50 (.923 / 29/32 / 2 hedges / 43): inside eval noise on everything; abstention
+and hedges moved in the right direction. Daniel: s150 is "good" but the s50 wording reads better —
+"more of the choice of words than actual accuracy".
+
+Honcho harness (`honcho_verbosity_test.py`, the 5 original questions, median words / latency):
+
+| level | qwen3.5:9b | dialectic_s50 | dialectic_s150 |
+|---|---|---|---|
+| minimal | 0 w (4/5 empty) | 44 w, 5–15 s | ~33 w, 3–15 s |
+| low | **328 w**, 13–44 s | **42 w**, 4–11 s | **37 w**, 4 s |
+| medium | 246 w, 12–58 s | 63 w, 4–5 s | 26 w, 2–11 s |
+| high | 324 w, 13–56 s | 44 w, 3–10 s | 44 w, 2–10 s |
+| max | 296 w, 11–50 s | 45 w, 3–11 s | 31 w, 2–4 s |
+
+PLAN §1 success (median ≤ 150 w at `low`) met by 8×; latency 5–10× lower; the base's `minimal`
+empties (PLAN §2.3) are the answered-inside-thinking failure and are gone. Levels no longer change
+the answer length, as PLAN §3.3 predicted (they differ in tool budget, not style).
+
+Decisions: size curve closed at 150 (nothing measurable moved from 50). Two cheap follow-ups:
+(1) style — export `runs/s150-sft/merged` as `dialectic_s150_sft` and compare wording with s50 and
+s150 on the same Honcho questions; if the SFT-only model reads like s50, DPO is what dried the
+wording and can be dropped or softened (lower β / fewer steps), saving the DPO hours in every
+future run; (2) the hard-question gate at `high` (PLAN §7) before the all-level swap.

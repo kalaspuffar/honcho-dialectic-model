@@ -175,7 +175,7 @@ Each context embeds: 4–8 relevant findings + 4–6 plausible distractors (same
 | A | Pipeline scripts + prompt parity file (`honcho_prompt.py` = verbatim `agent_system_prompt`) + repo skeleton + Modelfile + README | Mya | **DONE** 2026-09-03 (scripts untested — need keys/base-model probe) |
 | B | Teacher A/B trial: run `run_trial.sh` on Daniel's box (OpenRouter) → copy `results/openrouter_*.tar.gz` back → I score + log teacher choice in §3.2/§10 | Daniel (run, blind-review 10) + Mya (fold results) | **READY** (wallet-safe: estimate/cap/collect built & mock-verified); BLOCKED on `OPENROUTER_API_KEY` |
 | C | Smoke-test base LoRA → generate 1.2k contexts → stage2/3 → build_dataset → SFT → DPO → GGUF | Daniel (GPU) + Mya (scripts/monitor) | pending, needs Phase B winner |
-| D | Deploy to `low`, harness A/B, hard-set at `high`, all-level swap or split | Daniel | pending |
+| D | Deploy to `low`, harness A/B, hard-set at `high`, all-level swap or split | Daniel | **harness A/B DONE 2026-09-12** (§1 success criterion met: median 42 w vs 328, 8× under the 150-w target, 5–10× faster). Hard set at `high` + trial week pending. |
 
 ## 9. Risks & open questions
 
@@ -273,7 +273,8 @@ back to this host → I fold `summary.json` + your blind-review picks into §3.2
 | `dialectic-qwen3.5-9b` | 25 | process-verification run |
 | `dialectic_500` | **500** (v0.8.0, 2026-09-11) | first run that actually learned the data; overfit SFT (3 ep) + saturated DPO (1e-5); synthesis eval coverage .924 / 0 fabrication / 5/5 abstention on 50 held-out rows, but **probe 0/5 — no tool calls, fabricates without context. Not deployable.** |
 | `dialectic_500b` | **500** (v0.8.1, stripped Qwen3.5-9B, 2026-09-11/12) | tool turns trained: probe 5/5, DPO calibrated; but answers land in Ollama's `reasoning` field on 302/302 rows (model never emits `</think>` after the served `<think>\n`; TRAIN.md §12). `reasoning_effort: none` is not honoured by Ollama 0.32.12. **Not deployable via /v1.** |
-| `dialectic_s50` | **50** (v0.8.2 encoding, 2 SFT epochs, 2026-09-12) | **first deployable model.** Through plain `/v1`, no flags: probe 5/5, 50 held-out rows median 29 words (base 122), coverage .881 (base .876), fabrication 0, abstention 5/5, hedges 2, empty 0, answered-in-thinking 0, over-search 8/50 (base 80/302). |
+| `dialectic_s50` | **50** (v0.8.2 encoding, 2 SFT epochs, DPO effectively none, 2026-09-12) | **first deployable model.** 302 held-out rows: median 25 words (base 122), coverage .923 (base .876), fabrication 0, abstention 29/32 (base 3/32), hedges 2, empty 0, over-search 43 (base 80); probe 5/5. **Honcho harness (§7, 5 questions) at `low`: median 42 words, 4–11 s** vs base 328 words, 13–44 s. Daniel prefers its wording. |
+| `dialectic_s150` | **150** (same recipe + DPO 19 steps @ 1e-5, 2026-09-12) | 302 rows: median 23 words, coverage .912, fabrication 0, **abstention 32/32, hedges 0**, over-search 43; probe 5/5. Honcho `low`: median 37 words, ~4 s. Statistically the same as s50 on the eval; Daniel finds its wording drier ("choice of words, not accuracy"). Open: whether DPO caused the style shift (its SFT-only merge `runs/s150-sft/merged` is not yet evaluated). |
 
 Validation (2026-09-09): the three are behaviorally indistinguishable — head-to-head 10 wins/9 losses each across 152 common rows; all ~0.68–0.70 coverage vs base 0.663; all ~1.5× more terse than base; all serve 16k/32k context fine via `num_ctx` override (no retrain needed). Full write-up + open questions (why 500≈2000: method vs data-prep vs premise) in vault `active-projects/Honcho-Dialectic-Verbosity-Report.md` §11.
 
@@ -343,3 +344,12 @@ Validation (2026-09-09): the three are behaviorally indistinguishable — head-t
   model must close the think block itself — which it now does. Next: `dialectic_s50` on the full
   302-row eval and into Honcho's `low` level for the harness A/B; 500-row retrain under the new
   encoding to see whether data size moves anything beyond 50 rows.
+
+- **2026-09-12 (evening)** Phase D harness A/B, all five levels, same 5 questions as the 2026-09-03
+  baseline. Base `qwen3.5:9b`: `minimal` 4/5 empty, `low` median 328 w (207–400) at 13–44 s, other
+  levels 246–324 w. `dialectic_s50`: 42–63 w median at every level, 3–11 s. `dialectic_s150`: 26–44 w,
+  2–4 s. Success criterion (median ≤ 150 w, no regression on abstention) met by both; "night and day
+  in usability" (Daniel). Size curve stops here: 50 → 150 changed nothing measurable (coverage .923 →
+  .912, abstention 29 → 32 of 32, over-search 43 → 43) and Daniel prefers the 50-row wording; no
+  500-row or larger run is scheduled. Remaining questions are style (does DPO dry the wording? test:
+  evaluate `runs/s150-sft/merged`) and the hard-question gate at `high` before the all-level swap.
