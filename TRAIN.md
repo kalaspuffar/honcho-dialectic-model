@@ -488,3 +488,23 @@ ollama show qwen3.5:9b --modelfile | grep -v '^#'            # RENDERER / PARSER
 curl -s http://node7.ea.org:11434/api/chat -d '{"model":"dialectic_500b","stream":false,"think":false,"messages":[{"role":"user","content":"Reply with the single word ready."}]}'
 curl -s http://node7.ea.org:11434/api/chat -d '{"model":"dialectic_500b","stream":false,"messages":[{"role":"user","content":"Reply with the single word ready."}]}'
 ```
+
+### 2026-09-12 — serving mechanism confirmed; 50-row smoke of the close-tag fix
+
+`ollama show qwen3.5:9b --modelfile` has `RENDERER qwen3.5` / `PARSER qwen3.5`; `dialectic_500b`
+(raw GGUF, same `qwen35` architecture) reports the `thinking` capability and behaves identically, so
+Ollama builds the prompt with its built-in renderer and the GGUF's Jinja template is not used. Native
+`/api/chat` with `"think": false` → content `ready`, 2 tokens; without the flag the model thinks at
+length on that off-distribution prompt, closes the tag and answers (base habit); on the Honcho
+trajectory it skips both the thinking and the closing tag. `/v1` cannot pass the flag. Hence the
+model must emit `</think>` itself → the separate-tokenization encoding above. If Honcho's client
+uses the native API with `think: false`, `dialectic_500b` already works; still open.
+
+Smoke (Daniel, 2026-09-12): 50 rows, the model need not be better, only not destroyed, and must
+close the tag. Pass = `--stage check` trainable text begins `\n</think>\n\n`; `--stage sample
+--open-think` on the SFT merge emits `\n</think>\n\n<answer><|im_end|>`; probe ≥ 4/5; eval via
+`/v1` on 50 rows: `empty_rows` 0, `answered_in_thinking_rows` 0, coverage not far below the base's
+.876. Timing from the 500-row run (24 s/SFT step, 4 samples/step; DPO 142 s/step): 50 rows × 2
+epochs ≈ 100 steps ≈ 40 min SFT; DPO 50 pairs = 6 steps ≈ 15 min, too few to learn anything and
+kept only to exercise the encoder (skip it if in a hurry). `verify_all.sh` gained `LIMIT=` and
+`BASELINE_JSONL=` (reuse `results/ab_20260912-075107/eval_baseline.jsonl`).
