@@ -1,0 +1,12 @@
+[
+  {"id": "q1", "category": "factual",       "query": "<original harness question 1 — copy from the vault JSON so the 304-word baseline stays comparable>"},
+  {"id": "q2", "category": "factual",       "query": "<original harness question 2>"},
+  {"id": "q3", "category": "summary",       "query": "<original harness question 3>"},
+  {"id": "q4", "category": "enumeration",   "query": "<original harness question 4>"},
+  {"id": "q5", "category": "preference",    "query": "<original harness question 5>"},
+  {"id": "h1", "category": "enumeration",   "query": "List every <thing> <peer> has mentioned <doing/owning> since <date>.", "expect": ["<item 1>", "<item 2>", "<item 3>"]},
+  {"id": "h2", "category": "enumeration",   "query": "Which <projects/tools/places> has <peer> talked about in <month>?", "expect": ["<item 1>", "<item 2>"]},
+  {"id": "h3", "category": "contradiction", "query": "What does <peer> say about <topic where two statements conflict>?", "expect": ["<value A>", "<value B>"]},
+  {"id": "h4", "category": "abstention",    "query": "What is <peer>'s <something never mentioned, near a real topic>?"},
+  {"id": "h5", "category": "supersession",  "query": "What is <peer>'s current <value that changed over time>?", "expect": ["<newest value>"]}
+]
