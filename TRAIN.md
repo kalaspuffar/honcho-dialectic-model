@@ -713,3 +713,8 @@ of a tool call, shown to the user as the answer (1 of 75 tuned harness answers).
 it ok because it was non-empty. `scoring.NARRATION` now marks such rows failed (coverage 0); the eval
 summary and `honcho_harness.py` report `narration_rows` / `narration`. Re-score old result files with
 `eval_model.py rescore` to see whether the 302-row evals contain any.
+
+Rescored with NARRATION (fc6a913): **0 narration rows in all four 302-row evals** (s50, s50_sft, s150,
+s150_sft; 1,208 rows). The single leak was in Honcho's live loop at `max` (tool budget 10), where the
+model drives its own search rounds — not in the fixed-trajectory eval. Watch `narration` in the
+harness during the trial week; no training change on one occurrence.
