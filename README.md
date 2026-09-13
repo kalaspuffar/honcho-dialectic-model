@@ -75,7 +75,7 @@ python3 gen_contexts.py run --n 3000 --model deepseek --out data/contexts.jsonl 
 
 # 2. the base model's own answers = rejected (Ollama host; slow — one request at a time by default)
 python3 gen_rejected.py --contexts data/contexts.jsonl --out data/rejected.jsonl \
-    --base http://node7.ea.org:11434/v1 --model qwen3.5:9b
+    --base http://localhost:11434/v1 --model qwen3.5:9b
 #    Ollama host busy? Same weights on OpenRouter (qwen/qwen3.5-9b, ~$0.10/$0.15 per M tokens, ≈ $0.5 per
 #    1 000 rows). Any OpenRouter alias or vendor/model id switches provider; the estimate is printed,
 #    --max-usd is an opt-in live cap, resume works across providers because the output file is the same.
@@ -101,9 +101,9 @@ by the filters; generate accordingly.
 
 ```bash
 # token lengths and the trainable tail of one row — no GPU; do this before every run
-python3 train_dialectic.py --stage check --model /data/smoke/qwen35-9b-text --data data/dataset_train.sft.jsonl --max-seq 6144
+python3 train_dialectic.py --stage check --model <qwen35-9b-text-dir> --data data/dataset_train.sft.jsonl --max-seq 6144
 
-python3 train_dialectic.py --stage sft --model /data/smoke/qwen35-9b-text --data data/dataset_train.sft.jsonl \
+python3 train_dialectic.py --stage sft --model <qwen35-9b-text-dir> --data data/dataset_train.sft.jsonl \
     --eval-data data/dataset_eval.sft.jsonl --out runs/v1-sft
 python3 train_dialectic.py --stage dpo --sft runs/v1-sft/merged --data data/dataset_train.dpo.jsonl --out runs/v1-dpo
 python3 train_dialectic.py --stage export --model runs/v1-dpo/merged --out runs/v1-gguf
@@ -135,13 +135,13 @@ python3 train_dialectic.py --stage dpo --sft runs/v1-sft-ep1/merged --data data/
 
 ```bash
 # baseline vs tuned on the held-out personas + tool-call probe, one command
-BASE=http://node7.ea.org:11434 TUNED=dialectic-v1 BASELINE=qwen3.5:9b bash verify_all.sh   # baseline scored with --answer-from-reasoning (qwen3.5:9b answers inside <think>) — TRAIN.md §7 2026-09-11
+BASE=http://localhost:11434 TUNED=dialectic-v1 BASELINE=qwen3.5:9b bash verify_all.sh   # baseline scored with --answer-from-reasoning (qwen3.5:9b answers inside <think>) — TRAIN.md §7 2026-09-11
 
 # or by hand
 python3 eval_model.py --contexts data/contexts.jsonl --ids-from data/dataset_eval.dpo.jsonl --model qwen3.5:9b   --out results/eval_base.jsonl
 python3 eval_model.py --contexts data/contexts.jsonl --ids-from data/dataset_eval.dpo.jsonl --model dialectic-v1 --out results/eval_v1.jsonl
 python3 eval_model.py compare results/eval_base.jsonl results/eval_v1.jsonl
-python3 probe_toolcalls.py --model dialectic-v1 --base http://node7.ea.org:11434
+python3 probe_toolcalls.py --model dialectic-v1 --base http://localhost:11434
 ```
 
 The final gate is the real Honcho loop (PLAN §6): point one `DIALECTIC_LEVELS__*` model at the

@@ -66,7 +66,7 @@ class H(BaseHTTPRequestHandler):
             with LOCK:
                 COUNTER[0] += 1
                 k = COUNTER[0]
-            name = "Daniel"
+            name = "Alex"
             for m in msgs:
                 if m.get("role") == "user":
                     for line in m["content"].splitlines():

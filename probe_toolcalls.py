@@ -5,8 +5,8 @@ Training only ever puts loss on the final synthesis turn, so tool calling should
 survive — this makes "should" a number. Uses the same tool schemas as training
 (trajectory.TOOL_SCHEMAS) through Ollama's native /api/chat.
 
-  python3 probe_toolcalls.py --model dialectic-v1 --base http://node7.ea.org:11434
-  python3 probe_toolcalls.py --model qwen3.5:9b   --base http://node7.ea.org:11434   # control
+  python3 probe_toolcalls.py --model dialectic-v1 --base http://localhost:11434
+  python3 probe_toolcalls.py --model qwen3.5:9b   --base http://localhost:11434   # control
 
 PASS = a tool_call with a parseable arguments object on >= 90% of prompts.
 """
@@ -21,11 +21,11 @@ from honcho_prompt import agent_system_prompt
 from trajectory import TOOLS, TOOL_SCHEMAS
 
 QUESTIONS = [
-    "What did Daniel say about the Ceph cluster last month?",
-    "Summarize Daniel's communication preferences with his partner.",
-    "Which projects was Daniel working on in August 2026?",
-    "How many bikes does Daniel own?",
-    "When did Daniel change his gym schedule?",
+    "What did the peer set as the deadline for the storage migration?"
+    "Summarize the peer's stated preferences for how to structure work sessions."
+    "Which projects was the peer working on this year?"
+    "How many monitors does the peer keep on the desk?"
+    "When did the peer change the weekly maintenance window?"
 ]
 
 
@@ -42,9 +42,9 @@ def call(base, model, sysp, user):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
-    ap.add_argument("--base", default=be.setting("OLLAMA_BASE", "http://node7.ea.org:11434/v1").replace("/v1", ""))
+    ap.add_argument("--base", default=be.setting("OLLAMA_BASE", "http://localhost:11434/v1").replace("/v1", ""))
     a = ap.parse_args()
-    sysp = agent_system_prompt("Daniel", "Daniel", None, None, TOOLS)
+    sysp = agent_system_prompt("Alex", "Alex", None, None, TOOLS)
     valid = 0
     for i, q in enumerate(QUESTIONS, 1):
         m = call(a.base, a.model, sysp, q)

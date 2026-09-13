@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # verify_all.sh — post-training A/B on the held-out split + tool-call probe.
-#   BASE=http://node7.ea.org:11434 TUNED=dialectic-v1 BASELINE=qwen3.5:9b bash verify_all.sh
+#   BASE=http://localhost:11434 TUNED=dialectic-v1 BASELINE=qwen3.5:9b bash verify_all.sh
 # Baseline column: qwen3.5:9b cannot switch thinking off and, through Ollama's /v1, writes its answer
 # inside <think> and returns empty content on most rows (TRAIN.md §7, 2026-09-11). Honcho would see
 # nothing — that is the base's real behaviour and one reason for the fine-tune. To still get words /

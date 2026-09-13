@@ -1,15 +1,15 @@
 # TRAIN.md — Unsloth Dialectic 10-row smoke test  (runbook)
 
-**Owner:** Daniel (node7 GPU) + Mya (scripts/monitor)
+**Owner:** Daniel (gpu-host GPU) + Mya (scripts/monitor)
 **Goal:** prove the whole pipeline (Unsloth SFT smoke → verify → optional DPO → GGUF → Ollama) works end-to-end on `qwen3.5:9b`, using the 10-row smoke files that already exist in this repo.
 **Duration:** ~30 min SFT smoke; ~1–2 h if DPO stage is added.
-**Cost:** ~$0 (node7 is local, no API in the loop). The 10-row data was already paid for via the Opus batch ($0.118 earlier).
+**Cost:** ~$0 (gpu-host is local, no API in the loop). The 10-row data was already paid for via the Opus batch ($0.118 earlier).
 
 ---
 
 ## 0. What's already on this host (Mya side) — verified before handoff
 - `smoke10_sft.jsonl` — 10 rows, `{messages:[system, user, assistant]}`. System carries the exact Honcho prompt + findings cache (matches runtime).
-- `smoke10_dpo.jsonl` — 10 rows, `{prompt:[system,user], chosen, rejected}`. Same 10 contexts; chosen = Opus (median 38w), rejected = qwen3.5:9b on node7 (median 153w), ratio ~3.78×.
+- `smoke10_dpo.jsonl` — 10 rows, `{prompt:[system,user], chosen, rejected}`. Same 10 contexts; chosen = Opus (median 38w), rejected = qwen3.5:9b on the Ollama host (median 153w), ratio ~3.78×.
 - `dataset_train.{sft,dpo}.jsonl` — full 25-row set, `dataset_eval.{sft,dpo}.jsonl` — 2 held-out rows (persona split). Not yet used by smoke.
 - `train_dialectic.py` — the Unsloth script (next section).
 - `Modelfile` — Ollama Modelfile template; `FROM` line is a placeholder that gets filled in once Unsloth hands off.
@@ -34,12 +34,12 @@ transformers 5.5.0 (≥ 5.2 requirement met). Runs on CPU RAM, ~17 GB bf16.
 
 ```bash
 # on the 3080 Ti host (strip = weights surgery, no GPU needed):
-/data/smoke/.venv/bin/python3 train_dialectic.py --stage strip \
-  --model Qwen/Qwen3.5-9B --out /data/smoke/qwen35-9b-text
+python3 train_dialectic.py --stage strip \
+  --model Qwen/Qwen3.5-9B --out <qwen35-9b-text-dir>
 
 # then A/B train the SAME 10 rows on the text-only 9B class:
-/data/smoke/.venv/bin/python3 train_dialectic.py --stage sft \
-  --model /data/smoke/qwen35-9b-text --data smoke10_sft.jsonl \
+python3 train_dialectic.py --stage sft \
+  --model <qwen35-9b-text-dir> --data smoke10_sft.jsonl \
   --out smoke-9b --load-bits 4 --max-seq 4096
 
 # DPO + export exactly as before, with --sft smoke-9b/merged / --model smoke-9b/merged
@@ -49,12 +49,12 @@ Expected outcome: a checkpoint that Ollama can load as `dialectic-qwen3.5-9b`
 (the name it already runs under), but now on the real 9B text backbone the
 other model was right to point at.
 
-## 2. On node7 — check before running
+## 2. On gpu-host — check before running
 ```bash
-ssh node7
+ssh <ollama-host>
 # 1a. GPU idle, no other workloads
 nvidia-smi
-#   Node7: RTX A6000 48 GB (per memory card; if that has shifted, re-check)
+#   e.g. a 48 GB card: RTX A6000 (per the nvidia-smi card; re-check if it has shifted)
 #   3080 Ti host: 11.6 GB — use --load-bits 4 --max-seq 4096 (default)
 # 1b. Unsloth + deps present
 python3 -c "import unsloth, transformers, torch, trl; \
@@ -66,19 +66,19 @@ python3 -c "import unsloth, transformers, torch, trl; \
 # 1c. Base model present
 ollama list | grep -E 'qwen3\.'
 #   qwen3.5:9b    <-- Ollama tag = production `low`; the Hub repo is VL. TRAIN ON ITS TEXT-ONLY
-#                     STRIP: /data/smoke/qwen35-9b-text (§0b). This is the base (PLAN §3.4).
+#                     STRIP: <qwen35-9b-text-dir> (§0b). This is the base (PLAN §3.4).
 #   qwen3:8b      <-- fallback ONLY if Qwen3.5 hits the LoRA-format snag; never the default
 ```
 
-If `unsloth` is not on node7, first do `pip install -U unsloth` in the same python env that ran the deriver.
+If `unsloth` is not on the Ollama host, first do `pip install -U unsloth` in the same python env that ran the deriver.
 
-## 2. Copy the script + data to node7
-From Mya's host:
+## 2. Copy the script + data to gpu-host
+From the source host:
 ```bash
 scp ~/honcho-dialectic-model/train_dialectic.py \
     ~/honcho-dialectic-model/smoke10_sft.jsonl \
     ~/honcho-dialectic-model/smoke10_dpo.jsonl \
-    node7:~/dialectic/       # destination dir on node7 (create if missing)
+    <ollama-host>:~/dialectic/       # destination dir on the Ollama host (create if missing)
 ```
 or via Syncthing if the dir is already synced.
 
@@ -142,7 +142,7 @@ Then run the same 30-context eval against the DPO-merged model.
 ## 6. Merge → GGUF → Modelfile → Ollama → Honcho
 Once a checkpoint passes Gate 1 AND the 30-context eval, the pipeline is:
 1. `python3 train_dialectic.py --stage export --model smoke/merged --out smoke-v0` → writes `smoke-v0/dialectic-q4_k_m.gguf`.
-2. Edit `Modelfile.v0` to `FROM /home/woden/dialectic/smoke-v0/dialectic-q4_k_m.gguf`.
+2. Edit `Modelfile.v0` to `FROM <export-dir>/smoke-v0/dialectic-q4_k_m.gguf`.
 3. `ollama create dialectic-qwen3.5-9b -f Modelfile.v0`
 4. Point Honcho's `DIALECTIC_LEVELS__LOW__MODEL=dialectic-qwen3.5-9b` (and, once proven on hard questions, `MEDIUM/HIGH/MAX`).
 5. A/B: run 30 contexts on `qwen3.5:9b` vs `dialectic-qwen3.5-9b` via the *real* Honcho loop (the `honcho_verbosity_test.py` harness we used in round 0). Record median words, entity retention, fabrications.
@@ -152,8 +152,8 @@ Once a checkpoint passes Gate 1 AND the 30-context eval, the pipeline is:
 |---|---|---|---|
 | 2026-09-04 | sft (attempt 1) | `HFValidationError: Repo id ... 'qwen3.5:9b'` — `qwen3.5:9b` is an Ollama tag; Unsloth loads from the HF Hub. Also import-order warning (unsloth must be imported first). | Script v0.5.0: `import unsloth` first + `MODEL_ALIASES` maps `qwen3.5:9b -> Qwen/Qwen3.5-9B`. Re-run the same §3 command. |
 | 2026-09-04 | sft (attempt 3) | `PIL.UnidentifiedImageError` — `Qwen/Qwen3.5-9B` is an **image-text-to-text (VL)** model (confirmed via Hub API: pipeline_tag `image-text-to-text`); Unsloth loaded a `Qwen3VLProcessor` and tried to read the prompt as an image. | v0.5.2: default + aliases now anchor on the text-only **`Qwen/Qwen3-8B`** (deriver-proven, `text-generation`). The 9B class has no official text-only build; community options listed in the script if we ever want the 9B class specifically. |
-| 2026-09-04 | sft (attempt 4, fixed v0.7.1) | `torch.AcceleratorError: CUDA error: an illegal memory access was encountered` at `fast_lora.py → matmul_lora → addmm_` — Unsloth's custom fast-LoRA kernels + bf16 base offloaded to CPU on the 12 GB 3080 Ti. | v0.7.1 (in this commit): 4-bit base is now the *default* (`--load-bits 4`) with a `try/except TypeError` guard so an unexpected `load_in_4bit` signature can't kill the run, `max_seq_length` default 4096 (down from 8192), `--max-seq` and `--load-bits` are real CLI flags, `warmup_steps` instead of deprecated `warmup_ratio` (transformers 5.5), `save_pretrained_gguf` gets a 3-way try/except fallback across unsloth versions. Run on the 3080 Ti with defaults; on node7 A6000 use `--load-bits 16 --max-seq 8192`. |
-| 2026-09-05 | env | Run moved to a **py3.13 box at `/data/smoke/.venv`** (was 3080 Ti py3.10, before that node7 plans). Daniel keeps node7 (A6000) for the full run later. | Defaults still sized for a 12 GB card; the box only needs `--load-bits 16 --max-seq 8192` if it has ≥24 GB VRAM. |
+| 2026-09-04 | sft (attempt 4, fixed v0.7.1) | `torch.AcceleratorError: CUDA error: an illegal memory access was encountered` at `fast_lora.py → matmul_lora → addmm_` — Unsloth's custom fast-LoRA kernels + bf16 base offloaded to CPU on the 12 GB 3080 Ti. | v0.7.1 (in this commit): 4-bit base is now the *default* (`--load-bits 4`) with a `try/except TypeError` guard so an unexpected `load_in_4bit` signature can't kill the run, `max_seq_length` default 4096 (down from 8192), `--max-seq` and `--load-bits` are real CLI flags, `warmup_steps` instead of deprecated `warmup_ratio` (transformers 5.5), `save_pretrained_gguf` gets a 3-way try/except fallback across unsloth versions. Run on the 3080 Ti with defaults; on a ~48 GB card (e.g. an A6000) use `--load-bits 16 --max-seq 8192`. |
+| 2026-09-05 | env | Run moved to a **py3.13 box** (was a smaller card with py3.10, before that the larger card was planned). The larger card is kept for the full runs. | Defaults still sized for a ~12 GB card; use `--load-bits 16 --max-seq 8192` only if the card has ≥24 GB VRAM. |
 | 2026-09-05 | sft (attempt 5) | Training itself now runs; crash at end-of-eval: `ValueError: Unable to create tensor ... 'labels'` — stock `DataCollatorWithPadding` can't tensorize ragged rows (eval batch defaulted to 8, rows have different lengths after -100 masking). | v0.7.3: `pad_collator()` pads to batch-max; **all `*_labels` fields → -100** (masked positions excluded from loss — this includes DPO's `c_labels`/`j_labels`, which a first draft wrongly 0-padded), ids → pad_token_id, masks → 0. `per_device_eval_batch_size=1` (SFT). |
 | 2026-09-05 | sft (attempt 6) | `TypeError: list indices must be integers or slices, not tuple` in `unsloth_zoo/loss_utils.py _unsloth_get_batch_samples` — Unsloth's pre-step runs `labels[..., 1:] != -100` (ellipsis slice) which needs a **torch tensor**; v0.7.3's collator padded correctly but returned plain Python lists. | v0.7.4: `pad_collator` wraps every field in `torch.tensor(..., dtype=torch.int64)` (list fallback if torch is unimportable). **SFT stage then PASSED end-to-end** (train + eval + adapter + merge; export fixed separately below). |
 | 2026-09-05 | export (attempt 1) | `TypeError: 'dict' object is not callable` (then `'int' object is not callable`) at `fix_tokenizer_bos_token`, `tokenizer("A")` — all three "fallback" call-forms died on the same line for the same reason: `save_pretrained_gguf(save_directory, tokenizer, quantization_bit=None)` — passing `{"quantization_bit":bits}` or a bare `bits` as the 2nd positional puts a non-tokenizer into the tokenizer slot. Fix: pass the real tokenizer as 2nd positional, and pick the quant kwarg by introspecting the **bound instance method** (`inspect.signature(model.save_pretrained_gguf)` — Unsloth attaches it per-instance, so it is not in the class dict) — current unsloth: `quantization_method="q4_k_m"`, older builds: `quantization_bit` |
@@ -162,18 +162,18 @@ Once a checkpoint passes Gate 1 AND the 30-context eval, the pipeline is:
 ## 7b. End-to-end status + pre-scale verification gates (2026-09-05)
 
 **Pipeline PROVEN end-to-end:** sft (10 rows) → dpo (10 pairs) → GGUF Q4_K_M export
-(`dialectic-qwen3.5-9b` on node7 Ollama, 8.2B Q4_K_M, 5.0 GB). The trained model is
+(`dialectic-qwen3.5-9b` on the Ollama host, 8.2B Q4_K_M, 5.0 GB). The trained model is
 a **pipeline proof, not a quality claim** — 20 total examples is noise-level signal.
 Naming caveat: the base is Qwen3-**8B**; "qwen3.5-9b" in the model name is a
 leftover from the dead-end VL attempt — rename before publishing anywhere.
 
-### Verified (measured on node7 Ollama, 2026-09-05)
+### Verified (measured on the Ollama host, 2026-09-05)
 | Gate | Result |
 |---|---|
 | Tool-calling intact after SFT+DPO (`probe_toolcalls.py`, 3 search-forced prompts, fine-tuned vs stock) | **3/3 valid `tool_calls` (100%)**, correct schema (`grep_messages`, parseable args) |
 | Dataset↔production prompt match (dataset system prompt vs `honcho_prompt.agent_system_prompt` builder, the one Honcho dialectic uses) | **96.5% char match; the only diff is the injected RETRIEVAL CACHE section** (dataset carries per-row findings; production builds the same section from live tool results) — i.e. the format matches, no systematic mismatch to worry about |
 
-### Quality A/B — MEASURED RUN 2, REAL 9B BASE (2026-09-06 10:31, node7, 30 trial contexts)
+### Quality A/B — MEASURED RUN 2, REAL 9B BASE (2026-09-06 10:31, gpu-host, 30 trial contexts)
 | metric | `qwen3.5:9b` raw | `dialectic-qwen3.5-9b` | Δ |
 |---|---|---|---|
 | median words | 141 | **91** | **−50 (−35%, the exact target direction)** |
@@ -295,7 +295,7 @@ refusal, rejected = refusal + context-disclosure), not a capability problem.
 | 2026-09-11 | sft (v0.8.0, first real 500-row run, 3 epochs at 2e-4) | Overfit after epoch 1: train loss .40 → .25 → .07, eval loss (held-out personas) **.442 → .461 → .596**. The last checkpoint, the worst of the three, was the one merged and handed to DPO. Category mix of the `head -n 500` slice was fine (117/94/69/65/53/52/50), so this is exposure, not data. | v0.8.1: `load_best_model_at_end` on eval loss (the merged model is the best epoch), default 2 epochs, per-epoch eval losses and the chosen checkpoint printed at the end. `--stage merge --adapter runs/x/checkpoint-N` merges an earlier epoch without retraining (checkpoint-125 = epoch 1 of this run). |
 | 2026-09-11 | dpo (v0.8.0, same run, 1e-5, 2 epochs, β 0.1) | Reference correct (step 0 margin exactly 0), but the loss saturated by **step 25 of 126** (acc 1.0 from step 10, loss .04 at step 25); the margin then drifted 3 → 12–25 (= 120–250 nats of log-ratio) over 100 steps at zero loss and grad-norm 1e-4. Starting from an overfit SFT model and summing log-probs over long verbose rejected answers makes the pairs trivially separable. | v0.8.1: lr 3e-6 for 500 rows (1e-5 saturates in 20 % of the run; the v0.7 5e-7 result is not evidence either way — that loss gathered the wrong logit position), 1 epoch, `StopWhenSaturated` callback (`--dpo-stop-loss 0.01 --dpo-stop-patience 10`), step log adds `d_chosen` / `d_rejected` so likelihood displacement is visible. `verify_pipeline.py` range for the default DPO lr widened to 3e-7 … 2e-5. |
 | 2026-09-11 | sft+dpo (v0.8.0 500-row model, `dialectic_500`) | **Tool calling gone**: `probe_toolcalls.py` 0/5 (base qwen3.5:9b 5/5). Every prompt got a text answer with no search; 3 of 5 stated facts about Daniel that were not in context (fabrication), 2 abstained without looking. Eval could not see it — every eval row already contains the tool results, so only the synthesis turn is exercised (there it scored coverage .924, 0 fabrication, 5/5 abstention). Cause: loss only on the final turn, so 500 trajectories × 3 epochs taught "this system prompt → text". | v0.8.1: `--tool-turns all` (default) adds one SFT sample per assistant `tool_calls` turn (prefix up to that point → the call); `check` prints the trainable text of the first tool turn; `verify_pipeline.py` covers the derived rows. `probe_toolcalls.py` must pass before any eval numbers count. |
-| 2026-09-11 | eval (base column) | `qwen3.5:9b` on node7 Ollama: 31/50 empty answers, 15 rows with extra tool calls, median 0 words — not the ~153-word base measured 2026-09-06 (which ran the student on OpenRouter for stage 2). Base column is not a valid baseline. | **Diagnosed** on row c00102: `finish_reason: stop`, 1003 completion tokens of 1500, `reasoning` field 3.7k chars *containing the full answer*, content empty — the model answers inside `<think>` and stops; not a token-cap problem. `"think": false` on `/v1/chat/completions` is ignored (reasoning 1.9k chars, content still empty). Qwen3.5 has no thinking-off switch (the template always opens `<think>`, see §12), so this is the base's real behaviour under Ollama and one reason for the fine-tune. Fix: eval rows carry `finish_reason` / `answered_in_thinking` / `reasoning_chars`; the baseline column runs with `--answer-from-reasoning` (scores the reasoning text when content is empty, so words/coverage/fabrication are measurable) and the summary reports `answered_in_thinking_rows`. The tuned column never gets the fallback: if it shows `answered_in_thinking_rows` > 0 the SFT failed to teach the immediate `</think>`. OpenRouter (`EVAL_BASELINE=qwen9b`) optional, no credits at present. |
+| 2026-09-11 | eval (base column) | `qwen3.5:9b` on the Ollama host: 31/50 empty answers, 15 rows with extra tool calls, median 0 words — not the ~153-word base measured 2026-09-06 (which ran the student on OpenRouter for stage 2). Base column is not a valid baseline. | **Diagnosed** on row c00102: `finish_reason: stop`, 1003 completion tokens of 1500, `reasoning` field 3.7k chars *containing the full answer*, content empty — the model answers inside `<think>` and stops; not a token-cap problem. `"think": false` on `/v1/chat/completions` is ignored (reasoning 1.9k chars, content still empty). Qwen3.5 has no thinking-off switch (the template always opens `<think>`, see §12), so this is the base's real behaviour under Ollama and one reason for the fine-tune. Fix: eval rows carry `finish_reason` / `answered_in_thinking` / `reasoning_chars`; the baseline column runs with `--answer-from-reasoning` (scores the reasoning text when content is empty, so words/coverage/fabrication are measurable) and the summary reports `answered_in_thinking_rows`. The tuned column never gets the fallback: if it shows `answered_in_thinking_rows` > 0 the SFT failed to teach the immediate `</think>`. OpenRouter (`EVAL_BASELINE=qwen9b`) optional, no credits at present. |
 | 2026-09-11 | base model | Stale `train_dialectic.py` default `--model Qwen/Qwen3-8B` + alias `qwen3.5:9b -> Qwen/Qwen3-8B` and a stale §2 note ("qwen3:8b is what we train on") led to hours on the wrong base. The base is the stripped text-only Qwen3.5-9B (§0b, PLAN §3.4). | `--model` is now required for check/sft/export, the tag/VL-repo names exit with a pointer to `--stage strip`, and Qwen3-8B is reachable only by naming it explicitly. |
 
 ## 9. v0.8.0 runbook delta (2026-09-10)
@@ -382,10 +382,10 @@ answers) and `none` (v0.8.0) are available. The eval loss now includes tool turn
 comparable with the .442 of the previous run.
 
 Retrain plan for the same 500 rows (SFT must be redone; `checkpoint-125` has no tool turns).
-`<base>` = `/data/smoke/qwen35-9b-text`, the stripped Qwen3.5-9B (§0b) — **not** Qwen3-8B:
+`<base>` = `<qwen35-9b-text-dir>`, the stripped Qwen3.5-9B (§0b) — **not** Qwen3-8B:
 ```
-python3 train_dialectic.py --stage check --model /data/smoke/qwen35-9b-text --data data/train500.sft.jsonl --max-seq 8192   # GATE, see below
-python3 train_dialectic.py --stage sft --model /data/smoke/qwen35-9b-text --data data/train500.sft.jsonl --eval-data data/eval50.sft.jsonl --out runs/v2-sft-500 --load-bits 16 --max-seq 8192
+python3 train_dialectic.py --stage check --model <qwen35-9b-text-dir> --data data/train500.sft.jsonl --max-seq 8192   # GATE, see below
+python3 train_dialectic.py --stage sft --model <qwen35-9b-text-dir> --data data/train500.sft.jsonl --eval-data data/eval50.sft.jsonl --out runs/v2-sft-500 --load-bits 16 --max-seq 8192
 python3 probe_toolcalls.py --model <sft-only model in ollama>   # optional gate before DPO
 python3 train_dialectic.py --stage dpo --sft runs/v2-sft-500/merged --data data/train500.dpo.jsonl --out runs/v2-dpo-500
 python3 train_dialectic.py --stage export --model runs/v2-dpo-500/merged --out runs/v2-gguf-500
@@ -402,7 +402,7 @@ an empty think block — nothing from the prompt, no tool results. `dropped` sho
 
 ## 12. v2 500-row run on the stripped Qwen3.5-9B (2026-09-11)
 
-Base `/data/smoke/qwen35-9b-text` (§0b). `--stage check` on `data/dataset_500_train.sft.jsonl`
+Base `<qwen35-9b-text-dir>` (§0b). `--stage check` on `data/dataset_500_train.sft.jsonl`
 at `--max-seq 8192`: 500 answer turns + 1428 tool-call turns, kept 1928, **dropped 0**; tokens
 min 3283 / median 3838 / p95 4710 / max 5618. Trainable spans as expected — both begin with
 `\n\n</think>\n\n` (empty think block closed, then the turn) and end at `<|im_end|>`; nothing from
@@ -458,7 +458,7 @@ python3 train_dialectic.py --stage sample --model runs/v2-dpo-500/merged --data 
 python3 train_dialectic.py --stage export --model runs/v2-dpo-500/merged --out runs/v2-gguf-500b
 ollama create dialectic_500b -f Modelfile        # FROM -> runs/v2-gguf-500b/<file>.gguf
 ollama show dialectic_500b --template | tail -8  # default branch must be '<think>\n\n</think>\n\n'
-BASE=http://node7.ea.org:11434 TUNED=dialectic_500b bash verify_all.sh
+BASE=http://localhost:11434 TUNED=dialectic_500b bash verify_all.sh
 ```
 
 ### 2026-09-12 08:00 — closed-block template did not change what Ollama serves
@@ -485,8 +485,8 @@ Serving-side option, if Honcho can pass `think: false` on Ollama's native `/api/
 ```
 ollama show dialectic_500b                                  # capabilities: does it list thinking?
 ollama show qwen3.5:9b --modelfile | grep -v '^#'            # RENDERER / PARSER lines = built-in renderer in use
-curl -s http://node7.ea.org:11434/api/chat -d '{"model":"dialectic_500b","stream":false,"think":false,"messages":[{"role":"user","content":"Reply with the single word ready."}]}'
-curl -s http://node7.ea.org:11434/api/chat -d '{"model":"dialectic_500b","stream":false,"messages":[{"role":"user","content":"Reply with the single word ready."}]}'
+curl -s http://localhost:11434/api/chat -d '{"model":"dialectic_500b","stream":false,"think":false,"messages":[{"role":"user","content":"Reply with the single word ready."}]}'
+curl -s http://localhost:11434/api/chat -d '{"model":"dialectic_500b","stream":false,"messages":[{"role":"user","content":"Reply with the single word ready."}]}'
 ```
 
 ### 2026-09-12 — serving mechanism confirmed; 50-row smoke of the close-tag fix
@@ -524,7 +524,7 @@ kept only to exercise the encoder (skip it if in a hurry). `verify_all.sh` gaine
   alias `REASONING_EFFORT`; values none|minimal|low|medium|high|xhigh|max) is sent as
   `reasoning_effort` on every call. Ollama's `openai/openai.go` (main) maps `reasoning_effort:
   "none"` → `think=false`, i.e. the built-in renderer emits the closed block — the prompt from which
-  `dialectic_500b` already answers correctly (sample stage). **Whether node7's Ollama has that
+  `dialectic_500b` already answers correctly (sample stage). **Whether the Ollama host's has that
   mapping is the one thing to test**: `probe_empty.py … dialectic_500b … '{"reasoning_effort": "none"}'`
   (older Ollama: ignored or HTTP 400 "invalid reasoning value").
 - Temperature: Honcho sends it only if configured; otherwise Ollama's Modelfile defaults apply
@@ -535,12 +535,12 @@ kept only to exercise the encoder (skip it if in a hurry). `verify_all.sh` gaine
   for it; the base column should be re-measured at the defaults before it is quoted as "production".
 - `eval_model.py --reasoning-effort none` now sends what Honcho would send with THINKING_EFFORT=none.
 
-If node7's Ollama honours it, production config for the A/B with the existing weights:
+If the Ollama host's honours it, production config for the A/B with the existing weights:
 ```
 DIALECTIC_LEVELS__low__MODEL_CONFIG__TRANSPORT=openai
 DIALECTIC_LEVELS__low__MODEL_CONFIG__MODEL=dialectic_500b
 DIALECTIC_LEVELS__low__MODEL_CONFIG__THINKING_EFFORT=none
-DIALECTIC_LEVELS__low__MODEL_CONFIG__OVERRIDES__BASE_URL=http://node7.ea.org:11434/v1
+DIALECTIC_LEVELS__low__MODEL_CONFIG__OVERRIDES__BASE_URL=http://localhost:11434/v1
 ```
 The retrain (separate-tokenization encoding) remains the durable fix: it makes the model correct
 without the flag and on any Ollama version.
@@ -563,7 +563,7 @@ unchanged pipeline, served by Ollama 0.32.12 through `/v1` with **no flags**), 5
 | probe | 5/5 | 5/5 |
 
 So the encoding fix holds through the real serving path: the model emits `</think>` itself after
-Ollama's `<think>\n`. `reasoning_effort: none` on node7's Ollama 0.32.12 does **not** switch thinking
+Ollama's `<think>\n`. `reasoning_effort: none` on the Ollama host's 0.32.12 does **not** switch thinking
 off for `dialectic_500b` (still reasoning 365 chars, content empty), so that Honcho lever is not
 available on this host and `dialectic_500b` stays undeployable; `dialectic_s50` needs no lever.
 

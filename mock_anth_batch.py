@@ -37,7 +37,7 @@ def _content_for(params):
         with mo.LOCK:
             mo.COUNTER[0] += 1
             k = mo.COUNTER[0]
-        name = "Daniel"
+        name = "Alex"
         user = " ".join(m.get("content", "") for m in msgs if m.get("role") == "user")
         for line in user.splitlines():
             if line.startswith("Peer name:"):

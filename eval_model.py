@@ -4,7 +4,7 @@ over held-out contexts on the Honcho trajectory and score it with scoring.py
 (same rules as build_dataset.py).
 
   python3 eval_model.py --contexts data/contexts.jsonl --ids-from data/dataset_eval.dpo.jsonl \
-      --model qwen3.5:9b --base http://node7.ea.org:11434/v1 --out results/eval_base.jsonl
+      --model qwen3.5:9b --base http://localhost:11434/v1 --out results/eval_base.jsonl
   python3 eval_model.py --contexts data/contexts.jsonl --ids-from data/dataset_eval.dpo.jsonl \
       --model dialectic-v1 --out results/eval_v1.jsonl
   python3 eval_model.py --contexts ... --ids-from ... --model qwen9b --out results/eval_base_or.jsonl   # OpenRouter

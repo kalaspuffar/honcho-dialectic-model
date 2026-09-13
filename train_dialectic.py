@@ -17,9 +17,9 @@ Stages
           separates a model problem from an Ollama template/parser problem)
 
 Usage (GPU host, Unsloth venv):
-  python3 train_dialectic.py --stage strip  --out /data/smoke/qwen35-9b-text        # once per host
-  python3 train_dialectic.py --stage check  --model /data/smoke/qwen35-9b-text --data data/dataset_train.sft.jsonl
-  python3 train_dialectic.py --stage sft    --model /data/smoke/qwen35-9b-text --data data/dataset_train.sft.jsonl \
+  python3 train_dialectic.py --stage strip  --out <qwen35-9b-text-dir>        # once per host
+  python3 train_dialectic.py --stage check  --model <qwen35-9b-text-dir> --data data/dataset_train.sft.jsonl
+  python3 train_dialectic.py --stage sft    --model <qwen35-9b-text-dir> --data data/dataset_train.sft.jsonl \
                                             --eval-data data/dataset_eval.sft.jsonl --out runs/v1-sft
   python3 train_dialectic.py --stage merge  --adapter runs/v1-sft/checkpoint-125 --out runs/v1-sft-ep1
   python3 train_dialectic.py --stage dpo    --sft runs/v1-sft/merged --data data/dataset_train.dpo.jsonl --out runs/v1-dpo
@@ -573,7 +573,7 @@ def main():
     a = ap.parse_args()
 
     if a.stage in ("check", "sft", "export", "sample") and not a.model:
-        sys.exit("--model required: the text-only checkpoint dir from --stage strip (e.g. /data/smoke/qwen35-9b-text)")
+        sys.exit("--model required: the text-only checkpoint dir from --stage strip (e.g. <qwen35-9b-text-dir>)")
     if a.stage == "check":
         if not a.data: sys.exit("--data required")
         return run_check(a.model, a.data, a.max_seq, a.tool_turns)

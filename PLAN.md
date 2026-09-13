@@ -4,8 +4,8 @@
 **Owner:** Daniel (train/verify) + Mya (build/scaffold/scripts)
 **Started:** 2026-09-03
 **Supersedes:** the Tier-0/Tier-1/Tier-3 plan in `active-projects/Honcho-Dialectic-Verbosity-Report.md` — that report's *benchmark data and code findings* remain valid; its "fix it with config" conclusion is **abandoned** (see Decision Log).
-**Companion repo (this dir):** `~/honcho-dialectic-model/` — training data + Modelfile, mirrors `kalaspuffar/honcho-deriver-model` conventions.
-**Predecessor work:** `kalaspuffar/honcho-deriver-model` (deriver-qwen3, synthetic data via Opus, Unsloth, GGUF→Ollama) — proven pipeline we are copying.
+**Companion repo (this dir):** `~/honcho-dialectic-model/` — training data + Modelfile, mirrors `a prior Honcho model repo` conventions.
+**Predecessor work:** `a prior Honcho model repo` (deriver-qwen3, synthetic data via Opus, Unsloth, GGUF→Ollama) — proven pipeline we are copying.
 
 ---
 
@@ -27,7 +27,7 @@ A fine-tuned dialectic model (base **qwen3.5:9b**, same family as production `lo
 
 ### 3.1 Algorithm — DPO (paired preferred/short vs rejected/verbose), with SFT warm-up
 - Daniel's documented position (Zhao et al., arXiv:2505.12843): DPO over GRPO; naive length penalties reward-hack against correctness.
-- **Rejected side comes from our own base model** (rejection sampling): run qwen3.5:9b on node7 Ollama on each context → its natural verbose answer is the *rejected*. This beats a teacher-fabricated "verbose" because it is the true distribution we're fighting.
+- **Rejected side comes from our own base model** (rejection sampling): run qwen3.5:9b on the Ollama host on each context → its natural verbose answer is the *rejected*. This beats a teacher-fabricated "verbose" because it is the true distribution we're fighting.
 - **Chosen side** = teacher-written ideal terse answer (teacher TBD by A/B, Phase B).
 - **Recommended schedule:** ~500-row SFT warm-up (task format: findings→answer) → DPO on ~1–2k pairs. If plain SFT on chosen reaches target it's also acceptable (cheaper eval); DPO is the default per 3.1.
 - VRAM fit: QLoRA 9B on the A6000 48GB fits with room; reuse the deriver runbook for Unsloth notebook params (r=16, bf16, 4-bit base).
@@ -123,7 +123,7 @@ no third-party key, no new wallet). Pilot first on the existing 30 contexts, the
 
 ```
 stage1  generate_contexts.py      teacher (Opus/fixed): (persona, question, findings-pool, rubric) × N
-stage2  base_answer_probe.py      local: qwen3.5:9b on node7 Ollama answers each context  → REJECTED (its natural verbose style)
+stage2  base_answer_probe.py      local: qwen3.5:9b on the Ollama host answers each context  → REJECTED (its natural verbose style)
 stage3  write_chosen.py           teacher (A/B winner): ideal terse answer per context   → CHOSEN
 stage4  build_dataset.py          join + filters + 90/10 split + SFT/DPO formats          → train.jsonl / dpo.jsonl
 ```
@@ -260,7 +260,7 @@ back to this host → I fold `summary.json` + your blind-review picks into §3.2
   excellent (coverage .924, 0 fabrication, 5/5 abstention, median 32 words) precisely because eval
   rows always contain the tool results. Root cause: SFT loss on the final turn only. v0.8.1 trains
   every `tool_calls` turn of the trajectory as well (`--tool-turns all`, default). Gate order from
-  now on: `probe_toolcalls.py` ≥ 90 % first, eval second. Base eval column on node7 Ollama was
+  now on: `probe_toolcalls.py` ≥ 90 % first, eval second. Base eval column on the Ollama host was
   invalid (31/50 empty answers) — open item. Details TRAIN.md §11.
 
 ## 11. Trained model inventory (Daniel, 2026-09-09)
@@ -330,7 +330,7 @@ Validation (2026-09-09): the three are behaviorally indistinguishable — head-t
 
 - **2026-09-11** Base-model correction. Stale defaults in `train_dialectic.py` (`--model Qwen/Qwen3-8B`,
   alias `qwen3.5:9b -> Qwen/Qwen3-8B`) and a stale TRAIN.md §2 note pointed a run at Qwen3-8B. §3.4
-  stands: the base is the **stripped text-only Qwen3.5-9B** (`/data/smoke/qwen35-9b-text`); Qwen3-8B
+  stands: the base is the **stripped text-only Qwen3.5-9B** (`<qwen35-9b-text-dir>`); Qwen3-8B
   is the fallback only and must be named explicitly. `--model` is now required. Baseline eval column:
   `qwen3.5:9b` via Ollama answers inside `<think>` and returns empty content (31/50 rows); Qwen3.5
   cannot disable thinking, which is part of why we fine-tune. The eval scores the base's reasoning
@@ -341,7 +341,7 @@ Validation (2026-09-09): the three are behaviorally indistinguishable — head-t
   tokenizing the served prompt and the `\n</think>\n\n`+turn completion separately. A 50-row smoke
   (`dialectic_s50`) beats the base on every metric through the same `/v1` path Honcho uses. Honcho
   (v3.1.2, read from source) reaches Ollama only via the OpenAI-compatible endpoint and reads
-  `content` only; its `THINKING_EFFORT=none` lever is not honoured by node7's Ollama 0.32.12, so the
+  `content` only; its `THINKING_EFFORT=none` lever is not honoured by the Ollama host's 0.32.12, so the
   model must close the think block itself — which it now does. Next: `dialectic_s50` on the full
   302-row eval and into Honcho's `low` level for the harness A/B; 500-row retrain under the new
   encoding to see whether data size moves anything beyond 50 rows.

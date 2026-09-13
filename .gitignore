@@ -10,3 +10,7 @@ context_pool.jsonl
 __pycache__/
 
 data/
+
+# scratch / working artifacts (not part of the deliverable; keep out of the tree)
+workspace/
+graphify-out/

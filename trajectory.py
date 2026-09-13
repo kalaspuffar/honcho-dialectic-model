@@ -161,7 +161,7 @@ def stringify_tool_args(msgs):
 
 
 # ------------------------------------------------ student answering (OpenAI-compatible)
-OPENROUTER_HEADERS = {"HTTP-Referer": "https://github.com/kalaspuffar/honcho-dialectic-model",
+OPENROUTER_HEADERS = {"HTTP-Referer": "honcho-dialectic-model",
                       "X-Title": "honcho-dialectic-model"}
 
 

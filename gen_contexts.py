@@ -50,7 +50,7 @@ DOMAINS = ["health", "career", "music", "gaming", "baking", "travel", "family", 
            "photography", "cycling", "parenting", "software-projects", "relationships", "education",
            "cars", "film", "volunteering", "mental-health", "housing", "sports-fandom"]
 
-NAMES = ["Daniel", "Maria", "Alex", "Priya", "Jonas", "Emily", "Kwame", "Sofia", "Liam", "Aisha",
+NAMES = ["Alex", "Maria", "Alex", "Priya", "Jonas", "Emily", "Kwame", "Sofia", "Liam", "Aisha",
          "Noah", "Hanna", "Mateo", "Yuki", "Oliver", "Chloe", "Ravi", "Elin", "Tomas", "Zara",
          "Felix", "Nadia", "Omar", "Ingrid", "Lucas", "Mei", "Erik", "Amara", "Leo", "Sara",
          "Viktor", "Fatima", "Hugo", "Lena", "Arjun", "Klara", "Samuel", "Ines", "Ben", "Freya"]

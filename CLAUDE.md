@@ -107,7 +107,7 @@ Invariants that span files:
   `--stage check` reports lengths; trajectory rows are ~4–5k tokens, default `--max-seq 6144`.
 - Adapters are merged with Unsloth's `save_pretrained_merged(..., "merged_16bit")` when available;
   `merge_and_unload` on a 4-bit base re-quantises and is only the fallback.
-- **Base = the stripped text-only Qwen3.5-9B** (`--stage strip --out /data/smoke/qwen35-9b-text`, PLAN
+- **Base = the stripped text-only Qwen3.5-9B** (`--stage strip --out <qwen35-9b-text-dir>`, PLAN
   §3.4, TRAIN.md §0b), matching production `low` = `qwen3.5:9b`. `Qwen/Qwen3-8B` is the fallback only
   if Qwen3.5 hits a LoRA-format problem and must be named explicitly. `--model` has no default; the
   Ollama tag and the VL Hub repo are rejected with a pointer to strip.

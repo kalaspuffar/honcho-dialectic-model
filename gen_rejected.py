@@ -13,7 +13,7 @@ script switches provider, prints the cost estimate and tracks live spend.
 
   python3 gen_rejected.py --contexts data/contexts.jsonl --out data/rejected.jsonl
   python3 gen_rejected.py --contexts data/contexts.jsonl --out data/rejected.jsonl --only c00001,c00002
-  OLLAMA_BASE=http://node7.ea.org:11434/v1 OLLAMA_MODEL=qwen3.5:9b python3 gen_rejected.py ...
+  OLLAMA_BASE=http://localhost:11434/v1 OLLAMA_MODEL=qwen3.5:9b python3 gen_rejected.py ...
   python3 gen_rejected.py --contexts data/contexts.jsonl --out data/rejected.jsonl \
       --model qwen9b --concurrency 8 [--max-usd 2]              # OpenRouter (OPENROUTER_API_KEY)
 

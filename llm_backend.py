@@ -55,7 +55,7 @@ MODELS = {
     # student on OpenRouter (stage 2 / eval when the Ollama host is busy)
     "qwen9b":     ("openrouter", "qwen/qwen3.5-9b",                 0.10,  0.15),
 }
-OLLAMA_DEFAULT_BASE = "http://node7.ea.org:11434/v1"
+OLLAMA_DEFAULT_BASE = "http://localhost:11434/v1"
 OLLAMA_DEFAULT_MODEL = "qwen3.5:9b"
 
 
@@ -255,7 +255,7 @@ def complete(spec: ModelSpec, key: str, job: dict, effort=None, temperature=0.2)
             "messages": [{"role": "system", "content": job["system"]},
                          {"role": "user", "content": job["user"]}]}
     headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json",
-               "HTTP-Referer": "https://github.com/kalaspuffar/honcho-dialectic-model",
+               "HTTP-Referer": "honcho-dialectic-model",
                "X-Title": "honcho-dialectic-model"}
     data = _post_json(OPENROUTER_BASE + "/chat/completions", headers, body)
     if "error" in data and not data.get("choices"):
